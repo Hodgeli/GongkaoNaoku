@@ -3,8 +3,16 @@
 /* ---------- 版本自愈 ----------
    旧版页面被浏览器 / CDN 边缘节点用 max-age=86400 强缓存，导致"改了代码但打开还是旧界面"。
    这里让脚本核对页面里的版本标记：不一致就一次性跳到带版本号的新地址，
-   绕过浏览器与边缘节点的两层缓存。kg_healed 防止极端情况下死循环。 */
-const APP_VER = '20261023a';
+   绕过浏览器与边缘节点的两层缓存。kg_healed 防止极端情况下死循环。
+   版本号取自本脚本自己的 src（服务端按 app.js/style.css 指纹注入），无需手改。 */
+const APP_VER = (function () {
+  try {
+    const s = document.currentScript || document.querySelector('script[src*="/static/app.js"]');
+    const m = s && s.src ? s.src.match(/[?&]v=([^&#]+)/) : null;
+    if (m) return decodeURIComponent(m[1]);
+  } catch (e) { }
+  return '20261023a';
+})();
 let HEALING = false;
 (function selfHeal() {
   try {
@@ -44,26 +52,32 @@ class ApiError extends Error {
   constructor(msg, status) { super(msg); this.status = status; }
 }
 async function API(p) {
-  let r;
-  try { r = await fetch(withU(p)); }
-  catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
-  if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
-  if (!r.ok) throw new ApiError('服务器返回 ' + r.status + '，请稍后重试', r.status);
-  try { return await r.json(); }
-  catch (e) { throw new ApiError('服务器返回数据异常，请重试', r.status); }
+  netBegin();
+  try {
+    let r;
+    try { r = await fetch(withU(p)); }
+    catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
+    if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
+    if (!r.ok) throw new ApiError('服务器返回 ' + r.status + '，请稍后重试', r.status);
+    try { return await r.json(); }
+    catch (e) { throw new ApiError('服务器返回数据异常，请重试', r.status); }
+  } finally { netEnd(); }
 }
 async function POST(p, b) {
-  let r;
+  netBegin();
   try {
-    r = await fetch(p, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({}, b, { token: tok() })),
-    });
-  } catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
-  if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
-  if (!r.ok) throw new ApiError('服务器返回 ' + r.status + '，请稍后重试', r.status);
-  try { return await r.json(); }
-  catch (e) { throw new ApiError('服务器返回数据异常，请重试', r.status); }
+    let r;
+    try {
+      r = await fetch(p, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({}, b, { token: tok() })),
+      });
+    } catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
+    if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
+    if (!r.ok) throw new ApiError('服务器返回 ' + r.status + '，请稍后重试', r.status);
+    try { return await r.json(); }
+    catch (e) { throw new ApiError('服务器返回数据异常，请重试', r.status); }
+  } finally { netEnd(); }
 }
 function onExpired() { setTok(''); showLogin('登录已失效，请重新登录'); }
 const esc = (s) => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -141,6 +155,12 @@ function addSeen(qids) {
   } catch (e) { /* 隐私模式降级 */ }
 }
 
+/* 只有「会抽新题」的池才需要跨次去重（避免反复做同一批新题）。
+   复习到期/错题重练/收藏练习的题本来就是你练过的题，一旦套上去重就会永远为空 ——
+   这正是「总览显示今日待复习 3 道、点进复习到期却是 0 道」的根因。 */
+const EXCL_MODES = new Set(['new', 'study', 'mix']);
+const needExcl = mode => EXCL_MODES.has(mode);
+
 function clearSession() { try { localStorage.removeItem(SS_KEY); } catch (e) { } }
 function resumeSession() {
   const o = loadSession();
@@ -181,6 +201,7 @@ function resumeAgo(ts) {
 /* ---------- router ---------- */
 /* 任何视图抛错都不能让页面停在"加载中…"：统一兜住并给重试入口。 */
 async function nav() {
+  clearNextBar();
   try {
     return await route();
   } catch (e) {
@@ -224,9 +245,149 @@ async function refreshSide() {
   } catch (e) { return null; }
 }
 
-function loading(t = '加载中…') { app.innerHTML = `<div class="loading">${t}</div>`; }
+function loading(t) { loadingView(t); }
 function fatal(e) { app.innerHTML = `<div class="card" style="border-color:var(--bad)">出错了：${esc(String(e))}
   <div class="row" style="margin-top:14px"><button class="btn ghost" onclick="location.reload()">重试</button></div></div>`; }
+
+/* ---------- 统一的加载反馈 ----------
+   Pi 上单个接口可能要几百毫秒到数秒。任何一次点击都必须在 100ms 内出现可见变化，
+   否则用户无法判断"是不是点上了"。这里提供四档反馈，按操作阻塞程度选用：
+   1) netBegin/netEnd —— 顶部细进度条（所有 api 请求自动触发，静默兜底）
+   2) loadingView      —— 整页骨架（切换视图）
+   3) showMask         —— 半透明遮罩 + 转圈（阻塞式操作：取下一组题、交卷）
+   4) busyBtn          —— 按钮内联转圈 + 禁用（局部操作：评分、收藏、保存）
+   失败一律 toast 出来，不再静默吞掉（静默失败＝用户以为成功，数据却丢了）。 */
+let NET_DEPTH = 0, NET_TIMER = null, NET_LABEL = '';
+function netBarEl() {
+  let b = document.getElementById('netbar');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'netbar';
+    b.innerHTML = '<i></i><span class="netbar-txt"></span>';
+    document.body.appendChild(b);
+  }
+  return b;
+}
+function netBegin(label) {
+  NET_DEPTH++;
+  if (label) NET_LABEL = label;
+  if (NET_DEPTH === 1) {
+    clearTimeout(NET_TIMER);
+    NET_TIMER = setTimeout(() => {
+      const b = netBarEl(); b.classList.add('on');
+      const t = b.querySelector('.netbar-txt');
+      if (t && NET_LABEL) { t.textContent = NET_LABEL; t.classList.add('on'); }
+    }, 140);
+  }
+}
+function netEnd() {
+  NET_DEPTH = Math.max(0, NET_DEPTH - 1);
+  if (NET_DEPTH > 0) return;
+  clearTimeout(NET_TIMER); NET_TIMER = null;
+  const b = document.getElementById('netbar');
+  if (b) { b.classList.remove('on'); const t = b.querySelector('.netbar-txt'); if (t) t.classList.remove('on'); }
+  NET_LABEL = '';
+}
+
+let LOADING_TIMER = null;
+function loadingView(t) {
+  const t0 = Date.now();
+  clearInterval(LOADING_TIMER);
+  app.innerHTML = `<div class="loading"><div class="spinner"></div>
+    <div class="loading-txt">${esc(t || '加载中…')}</div>
+    <div class="loading-sub" id="loading-sub"></div></div>`;
+  LOADING_TIMER = setInterval(() => {
+    const sub = document.getElementById('loading-sub');
+    if (!sub) { clearInterval(LOADING_TIMER); return; }
+    const sec = Math.floor((Date.now() - t0) / 1000);
+    if (sec >= 2) sub.textContent = `已等待 ${sec} 秒，设备正在处理，请不要重复点击`;
+  }, 1000);
+}
+
+let MASK_N = 0;
+function showMask(text) {
+  MASK_N++;
+  let m = document.getElementById('kg-mask');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'kg-mask'; m.className = 'kg-mask';
+    m.innerHTML = '<div class="kg-mask-box"><div class="spinner"></div><div class="kg-mask-txt"></div><div class="kg-mask-sub">请稍候，不要重复点击</div></div>';
+    document.body.appendChild(m);
+  }
+  m.querySelector('.kg-mask-txt').textContent = text || '正在处理…';
+  m.querySelector('.kg-mask-sub').textContent = '请稍候，不要重复点击';
+  m.classList.add('on');
+  clearTimeout(m._slow);
+  m._slow = setTimeout(() => {
+    const s = m.querySelector('.kg-mask-sub');
+    if (s) s.textContent = '设备响应较慢，仍在处理，请不要刷新页面';
+  }, 3000);
+  return hideMask;
+}
+function hideMask() {
+  MASK_N = Math.max(0, MASK_N - 1);
+  if (MASK_N > 0) return;
+  const m = document.getElementById('kg-mask');
+  if (!m) return;
+  clearTimeout(m._slow); m.classList.remove('on');
+}
+
+function busyBtn(btn, label) {
+  if (!btn) return () => { };
+  const html = btn.innerHTML, dis = btn.disabled;
+  btn.disabled = true; btn.classList.add('busy');
+  btn.innerHTML = `<span class="spinner sm"></span><span>${esc(label || '处理中…')}</span>`;
+  return () => { btn.innerHTML = html; btn.disabled = dis; btn.classList.remove('busy'); };
+}
+
+function toast(msg, kind) {
+  let box = document.getElementById('toast-box');
+  if (!box) { box = document.createElement('div'); box.id = 'toast-box'; document.body.appendChild(box); }
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 300); }, kind === 'bad' ? 4500 : 2600);
+}
+
+/* 兜底：任何没被 catch 的请求异常都要让人看见，而不是只在控制台里 */
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e && e.reason;
+  if (r && r.status === 401) return;
+  console.error('[unhandled]', r);
+  toast(r instanceof ApiError ? r.message : ('操作没有完成：' + ((r && r.message) || r)), 'bad');
+});
+window.addEventListener('offline', () => toast('网络已断开，暂时无法保存，恢复后请重试', 'bad'));
+window.addEventListener('online', () => toast('网络已恢复'));
+
+/* 选项区「正在调取解析」提示：点到选项后 0 毫秒就有反馈，并显示已等待秒数 */
+let OPT_SLOW = null;
+function optionBusy(label) {
+  const box = document.getElementById('opts'); if (!box) return;
+  const S = state.session;
+  box.querySelectorAll('.opt').forEach(el => {
+    el.classList.add('pending');
+    if (S && S.chosen && el.dataset.key === S.chosen) el.classList.add('sel');
+  });
+  if (document.getElementById('opt-loading')) return;
+  box.insertAdjacentHTML('beforeend',
+    `<div class="opt-loading" id="opt-loading"><span class="spinner sm"></span><span id="opt-loading-txt">${esc(label || '正在调取本题解析…')}</span></div>`);
+  const t0 = Date.now();
+  clearInterval(OPT_SLOW);
+  OPT_SLOW = setInterval(() => {
+    const t = document.getElementById('opt-loading-txt');
+    if (!t) { clearInterval(OPT_SLOW); OPT_SLOW = null; return; }
+    const sec = Math.floor((Date.now() - t0) / 1000);
+    if (sec >= 8) t.textContent = `题库响应较慢，已等待 ${sec} 秒，仍在加载，请勿刷新`;
+    else if (sec >= 1) t.textContent = `正在调取本题解析…已等待 ${sec} 秒`;
+  }, 500);
+}
+function optionBusyEnd() {
+  clearInterval(OPT_SLOW); OPT_SLOW = null;
+  const box = document.getElementById('opts'); if (!box) return;
+  const ld = box.querySelector('.opt-loading'); if (ld) ld.remove();
+  box.querySelectorAll('.opt').forEach(el => el.classList.remove('pending', 'sel'));
+}
 
 /* ---------- dashboard ---------- */
 async function viewDashboard() {
@@ -362,7 +523,7 @@ async function startSession(cfg) {
   loading('拉取题目…');
   const p = new URLSearchParams();
   p.set('mode', cfg.mode); p.set('size', cfg.size || '20');
-  if (cfg.mode !== 'exam') p.set('exclude', loadSeen().join(','));
+  if (needExcl(cfg.mode)) p.set('exclude', loadSeen().join(','));
   if (cfg.module) p.set('module', cfg.module);
   if (cfg.category) p.set('category', cfg.category);
   if (cfg.kadian) p.set('kadian', cfg.kadian);
@@ -389,14 +550,16 @@ async function startSession(cfg) {
     marked: new Set(), limitOn: !!cfg.limitOn, limits: cfg.limits || loadLimits(),
     ids: cfg.ids || null, startTs: Date.now(), times: [], timeoutN: 0, qStart: Date.now(),
   };
-  addSeen(res.cards.map(c => c.qid));
+  /* 只把「新题」写进近期已练名单：复习/错题题不该占用新题去重名额 */
+  if (needExcl(cfg.mode)) addSeen(res.cards.filter(c => c.is_new !== false).map(c => c.qid));
   renderCard();
   saveSession();
 }
 
 function renderCard() {
   const S = state.session; const c = S.queue[S.idx];
-  if (!c) { clearSession(); return finishSession(); }
+  clearNextBar();
+  if (!c) { clearSession(); return finishSession().catch(e => { hideMask(); fatal(e); }); }
   S.phase = 'question'; S.chosen = null; S.full = null; S.graded = 0; S.qStart = Date.now();
   const hasMat = !!c.material; window.__curMatRaw = c.material;
   app.innerHTML = `
@@ -436,6 +599,7 @@ function renderCard() {
     const cb = document.getElementById('ctime-box'); if (cb) cb.innerHTML = '';
     stopLimitTimer();
   }
+  bindSwipe();
 }
 
 function renderOptions() {
@@ -512,10 +676,16 @@ function renderAct() {
     <p class="sub" style="margin-top:10px">按你的真实记忆强度自评（键盘 1/2/3/4 亦可）。系统将据此计算下次复习间隔。</p>`;
   act.querySelectorAll('.grade button').forEach(b => b.onclick = () => doGrade(+b.dataset.g));
   document.getElementById('t-fav').onclick = async (e) => {
+    const btn = e.currentTarget;
+    if (btn.classList.contains('busy')) return;
     const on = !f.fav;
-    await POST('/api/fav', { id: c2id(), on });
+    const restore = busyBtn(btn, on ? '收藏中…' : '取消中…');
+    let ok = false;
+    try { await POST('/api/fav', { id: c2id(), on }); ok = true; }
+    catch (err) { toast('收藏没保存成功：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+    if (!ok) return;
     f.fav = on ? 1 : 0;
-    const btn = document.getElementById('t-fav');
     btn.classList.toggle('on', !!on); btn.textContent = on ? '★ 已收藏' : '☆ 收藏';
     refreshSide();
   };
@@ -533,26 +703,67 @@ function toggleNote() {
     <textarea id="note-ta" placeholder="写下你的思路、易错提醒、秒杀技巧…">${esc(f.note || '')}</textarea>
     <div class="row"><span class="note-saved" id="note-saved">${f.note_updated ? '上次保存 ' + esc(f.note_updated) : ''}</span>
     <button class="btn sm ok" id="note-save">保存笔记</button></div></div>`;
-  document.getElementById('note-save').onclick = async () => {
+  document.getElementById('note-save').onclick = async (e) => {
+    const btn = e.currentTarget;
+    if (btn.classList.contains('busy')) return;
     const text = document.getElementById('note-ta').value.trim();
-    await POST('/api/note', { id: c2id(), text });
+    const restore = busyBtn(btn, '保存中…');
+    let ok = false;
+    try { await POST('/api/note', { id: c2id(), text }); ok = true; }
+    catch (err) { toast('笔记保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+    if (!ok) return;
     f.note = text;
     document.getElementById('note-saved').textContent = text ? '已保存 ✓' : '已清空笔记';
   };
 }
 
 async function doReveal() {
-  const S = state.session, c = S.queue[S.idx];
+  const S = state.session; if (!S) return;
+  /* 连点/键盘连按防护：加载中再点一次会重复拉取同一题 */
+  if (S.revealing || S.phase !== 'question') return;
+  const c = S.queue[S.idx];
+  S.revealing = true;
   stopLimitTimer();
-  try { const d = await API('/api/question?id=' + c.id); S.full = d.card; } catch (e) { return fatal(e); }
-  S.phase = 'answer'; renderOptions();
+  optionBusy();
+  const rbtn = document.getElementById('btn-reveal');
+  const restoreR = rbtn ? busyBtn(rbtn, '正在调取答案…') : null;
+  try {
+    const d = await API('/api/question?id=' + c.id);
+    S.full = d.card;
+    S.phase = 'answer';
+    renderOptions();
+  } catch (e) {
+    optionBusyEnd();
+    if (restoreR) restoreR();
+    toast('解析没能加载出来：' + (e && e.message ? e.message : e) + '　请再点一次选项', 'bad');
+  } finally {
+    clearInterval(OPT_SLOW); OPT_SLOW = null;
+    S.revealing = false;
+  }
 }
 
 async function doGrade(g) {
-  const S = state.session, c = S.queue[S.idx];
+  const S = state.session, c = S && S.queue[S.idx];
+  if (!S || !c || S.grading || S.graded) return;   // 连点只记一次分
+  S.grading = true;
   const dur = Date.now() - (S.qStart || Date.now());
-  S.times.push(dur); stopLimitTimer();
-  try { await POST('/api/grade', { id: c.id, grade: g, choice: S.chosen || '' }); } catch (e) { }
+  stopLimitTimer();
+  const btns = Array.from(document.querySelectorAll('.grade button'));
+  btns.forEach(b => { b.disabled = true; });
+  const restore = busyBtn(document.querySelector(`.grade button[data-g="${g}"]`), '记录中…');
+  let ok = false;
+  try {
+    await POST('/api/grade', { id: c.id, grade: g, choice: S.chosen || '' });
+    S.times.push(dur);
+    ok = true;
+  } catch (e) {
+    toast('评分没保存成功：' + (e && e.message ? e.message : e) + '　请重新点一次', 'bad');
+  } finally {
+    S.grading = false;
+    restore(); btns.forEach(b => { b.disabled = false; });
+  }
+  if (!ok) return;   // 保留评分按钮，让用户重试，避免"以为记下了其实丢了"
   refreshSide();
   // 不自动跳题：先让用户看完解析再走（只换掉评分区，正文与解析保持原样）
   S.graded = g;
@@ -561,23 +772,72 @@ async function doGrade(g) {
 }
 
 function nextCard() {
-  const S = state.session; if (!S) return;
+  const S = state.session; if (!S || S.nxBusy) return;
+  clearNextBar();
   S.graded = 0;
-  S.idx++;
-  if (S.idx >= S.queue.length) moreCards().then(renderCard); else renderCard();
-  saveSession();
+  if (S.idx + 1 < S.queue.length) { S.idx++; renderCard(); saveSession(); return; }
+  /* 本组题用完了：需要向服务端再要一组，这一段在 Pi 上可能明显卡顿 → 必须有遮罩 */
+  S.nxBusy = true;
+  showMask('正在取下一组题目…');
+  moreCards().then(got => {
+    if (got) renderCard();
+    else { S.idx = S.queue.length; renderCard(); }   // 没有更多题 → 结算页
+  }).catch(e => {
+    toast('取下一题失败：' + (e && e.message ? e.message : e) + '　请再点一次「下一题」', 'bad');
+  }).finally(() => { S.nxBusy = false; hideMask(); saveSession(); });
+}
+
+/* ---------- 评分后的前进操作条 ---------- */
+let NX_TIMER = null;
+function autoNextSec() {
+  try { return Math.max(0, Math.min(60, +localStorage.getItem('kg_autonext') || 0)); } catch (e) { return 0; }
+}
+function setAutoNext(v) { try { localStorage.setItem('kg_autonext', String(v)); } catch (e) { } }
+/* 操作条是移动端的固定底栏，切题/离开页面时必须撤掉，否则会盖在别的页面上 */
+function clearNextBar() {
+  if (NX_TIMER) { clearInterval(NX_TIMER); NX_TIMER = null; }
+  document.documentElement.removeAttribute('data-nextbar');
 }
 
 function renderNextBar() {
   const box = document.getElementById('act'); if (!box) return;
   const S = state.session;
   const last = S.idx >= S.queue.length - 1;
+  const auto = autoNextSec();
   box.innerHTML = `<div class="grade nextbar">
-    <span class="nx-tip">已记录 · 看完解析再继续</span>
+    <span class="nx-tip" id="nx-tip">已记录 · 看完解析再继续</span>
     <button class="btn ok nx-go">${last ? '完成本组 →' : '下一题 →'} <small>空格</small></button>
   </div>`;
+  document.documentElement.setAttribute('data-nextbar', '1');
   box.querySelector('.nx-go').onclick = nextCard;
   box.querySelector('.nx-go').focus({ preventScroll: true });
+  if (NX_TIMER) { clearInterval(NX_TIMER); NX_TIMER = null; }
+  if (auto) {
+    let left = auto;
+    const tip = document.getElementById('nx-tip');
+    const paint = () => { if (tip) tip.textContent = `${left} 秒后自动下一题 · 点按钮立即继续`; };
+    paint();
+    NX_TIMER = setInterval(() => {
+      left--;
+      if (left <= 0) { clearNextBar(); nextCard(); return; }
+      paint();
+    }, 1000);
+  }
+}
+
+/* 手机兜底：评分后向左滑 = 下一题（按钮被底栏/系统界面挡住时仍能前进） */
+function bindSwipe() {
+  let x0 = 0, y0 = 0, t0 = 0;
+  app.ontouchstart = (e) => {
+    if (!e.touches || e.touches.length !== 1) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; t0 = Date.now();
+  };
+  app.ontouchend = (e) => {
+    const S = state.session, t = e.changedTouches && e.changedTouches[0];
+    if (!S || !S.graded || !t) return;
+    if (Date.now() - t0 > 800) return;
+    if (t.clientX - x0 < -60 && Math.abs(t.clientY - y0) < 60) nextCard();
+  };
 }
 
 /* ---------- 功能2：限时模式倒计时 / 超时自动判错 ---------- */
@@ -606,11 +866,20 @@ function tickLimit() {
   if (remain <= 0) { stopLimitTimer(); timeoutCurrent(); }
 }
 async function timeoutCurrent() {
-  const S = state.session, c = S.queue[S.idx];
-  if (!S || !c) return;
+  const S = state.session, c = S && S.queue[S.idx];
+  if (!S || !c || S.timeoutBusy) return;
+  S.timeoutBusy = true;
+  const act = document.getElementById('act');
+  if (act) act.innerHTML = `<div class="opt-loading"><span class="spinner sm"></span>时间到，正在记为超时…</div>`;
   const dur = Date.now() - (S.qStart || Date.now());
   S.times.push(dur); stopLimitTimer();
-  try { await POST('/api/grade', { id: c.id, grade: 1, timeout: 1, choice: '' }); } catch (e) { }
+  try {
+    await POST('/api/grade', { id: c.id, grade: 1, timeout: 1, choice: '' });
+  } catch (e) {
+    toast('超时记录没保存成功：' + (e && e.message ? e.message : e) + '　请在「错题本」核对', 'bad');
+  } finally {
+    S.timeoutBusy = false;
+  }
   S.tally.done++; S.tally.wrong++; S.timeoutN = (S.timeoutN || 0) + 1;
   refreshSide();
   S.graded = 1;
@@ -626,11 +895,17 @@ async function moreCards() {
   if (cfg.category) p.set('category', cfg.category);
   if (cfg.kadian) p.set('kadian', cfg.kadian);
   if (cfg.ref) p.set('ref', cfg.ref);
-  let res = { cards: [] }; try { res = await API('/api/next?' + p); } catch (e) { }
-  if (res.cards.length) { S.queue = res.cards; S.idx = 0; }
+  if (needExcl(S.mode)) p.set('exclude', loadSeen().join(','));
+  const res = await API('/api/next?' + p);
+  if (res.cards.length) {
+    if (needExcl(S.mode)) addSeen(res.cards.filter(c => c.is_new !== false).map(c => c.qid));
+    S.queue = res.cards; S.idx = 0; return true;
+  }
+  return false;
 }
 
 async function finishSession() {
+  showMask('正在汇总本组结果…');
   const S = state.session;
   const total = S.tally.done, right = S.tally.right, wrong = S.tally.wrong;
   const acc = total ? Math.round(right / total * 100) : 0;
@@ -655,6 +930,7 @@ async function finishSession() {
     } catch (e) { }
     timing = `<p>总用时 ${tm} 分 ${ts} 秒 · 平均单题 ${avg.toFixed(1)}s · 本组正确率 <b style="color:${acc >= 60 ? 'var(--ok)' : 'var(--warn)'}">${acc}%</b>${S.timeoutN ? ` · 超时 <b style="color:var(--bad)">${S.timeoutN}</b> 次` : ''}</p>${cmp}`;
   }
+  hideMask();
   app.innerHTML = `<div class="empty"><div class="big">🏁</div>
     <h2>本组完成！</h2>
     <p>本轮练习 ${total} 题 · 对 ${right} · 错 ${wrong}</p>
@@ -762,8 +1038,19 @@ async function runSearch() {
   pushSearchHist(term); renderSearchHist();
   const m = val('s-mod'), c = val('s-cat');
   const p = new URLSearchParams(); p.set('q', term); if (m) p.set('module', m); if (c) p.set('category', c); p.set('size', '30');
-  const res = await API('/api/search?' + p);
-  const box = document.getElementById('search-results'); if (!box) return;
+  const box = document.getElementById('search-results');
+  const btn = document.getElementById('s-search');
+  if (btn && btn.classList.contains('busy')) return;
+  const restore = busyBtn(btn, '搜索中…');
+  if (box) box.innerHTML = '<div class="opt-loading"><span class="spinner sm"></span>正在检索题干…</div>';
+  let res;
+  try { res = await API('/api/search?' + p); }
+  catch (e) {
+    if (box) box.innerHTML = '';
+    toast('搜索失败：' + (e && e.message ? e.message : e) + '　请重试', 'bad');
+    return;
+  } finally { restore(); }
+  if (!box) return;
   if (!res.rows.length) { box.innerHTML = `<div class="empty" style="padding:20px">没有匹配「${esc(term)}」的题干</div>`; return; }
   box.innerHTML = `<p class="sub">匹配 ${res.total} 题（显示前 ${res.rows.length} 条）· 点击卡片看完整标注</p>` +
     res.rows.map(r => `<div class="card kd-card" style="margin-bottom:10px;cursor:pointer" onclick="location.hash='#/detail?id=${r.id}'">
@@ -873,19 +1160,42 @@ async function viewDetail(id) {
     <a class="btn ok" href="#/study?module=${encodeURIComponent(c.module)}&category=${encodeURIComponent(c.category)}&kadian=${encodeURIComponent(c.kadian)}">按此考点练习同类题</a>
   </div>`;
   document.getElementById('d-fav').onclick = async (e) => {
-    const on = !c.fav; await POST('/api/fav', { id: c.id, on }); c.fav = on ? 1 : 0;
-    const b = document.getElementById('d-fav'); b.classList.toggle('on', !!on); b.textContent = on ? '★ 已收藏' : '☆ 收藏'; refreshSide();
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
+    const on = !c.fav;
+    const restore = busyBtn(b, on ? '收藏中…' : '取消中…');
+    let ok = false;
+    try { await POST('/api/fav', { id: c.id, on }); ok = true; }
+    catch (err) { toast('收藏没保存成功：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+    if (!ok) return;
+    c.fav = on ? 1 : 0;
+    b.classList.toggle('on', !!on); b.textContent = on ? '★ 已收藏' : '☆ 收藏'; refreshSide();
   };
-  document.getElementById('d-note-save').onclick = async () => {
+  document.getElementById('d-note-save').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
     const text = document.getElementById('d-note').value.trim();
-    await POST('/api/note', { id: c.id, text });
+    const restore = busyBtn(b, '保存中…');
+    let ok = false;
+    try { await POST('/api/note', { id: c.id, text }); ok = true; }
+    catch (err) { toast('笔记保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+    if (!ok) return;
     document.getElementById('d-note-saved').textContent = text ? '已保存 ✓' : '已清空笔记';
   };
-  document.getElementById('d-doubt').onclick = async () => {
+  document.getElementById('d-doubt').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
     const resolved = c.doubt_status !== 'resolved';
-    await POST('/api/doubt', { id: c.id, status: resolved ? 'resolved' : '' });
+    const restore = busyBtn(b, '提交中…');
+    let ok = false;
+    try { await POST('/api/doubt', { id: c.id, status: resolved ? 'resolved' : '' }); ok = true; }
+    catch (err) { toast('标记没保存成功：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+    if (!ok) return;
     c.doubt_status = resolved ? 'resolved' : '';
-    const b = document.getElementById('d-doubt'); b.classList.toggle('on', resolved);
+    b.classList.toggle('on', resolved);
     b.textContent = resolved ? '✓ 疑点已复核' : '⚑ 标记疑点已复核';
   };
 }
@@ -1006,7 +1316,13 @@ async function viewDoubts() {
     ${page * 20 < res.total ? `<a class="btn ghost" href="${mk(page + 1)}">下一页 →</a>` : ''}</div>` : ''}`;
 }
 async function markDoubt(id, status, btn) {
-  await POST('/api/doubt', { id, status });
+  if (btn && btn.classList.contains('busy')) return;
+  const restore = busyBtn(btn, '提交中…');
+  let ok = false;
+  try { await POST('/api/doubt', { id, status }); ok = true; }
+  catch (e) { toast('标记没保存成功：' + (e && e.message ? e.message : e), 'bad'); }
+  finally { restore(); }
+  if (!ok) return;
   if (btn) { btn.textContent = status === 'resolved' ? '撤销复核标记' : '✓ 标记已复核'; btn.className = 'btn sm ' + (status === 'resolved' ? 'ghost' : 'ok'); }
   const tag = btn && btn.closest('.card') && btn.closest('.card').querySelector('.qhead .tag.review, .qhead .tag.learning');
 }
@@ -1028,7 +1344,7 @@ function viewExam() {
     <div class="row"><button class="btn big warn" id="e-go">▶ 开始模考</button></div>
   </div>
   <h2>历史记录</h2>
-  <div class="card" style="padding:0;overflow:auto" id="e-hist"><div class="loading">加载历史…</div></div>`;
+  <div class="card" style="padding:0;overflow:auto" id="e-hist"><div class="loading" style="padding:26px"><div class="spinner"></div><div class="loading-txt">加载历史…</div></div></div>`;
   const emod = document.getElementById('e-mod');
   emod.onchange = () => {
     const c = document.getElementById('e-cat'); const mv = emod.value;
@@ -1061,7 +1377,18 @@ async function startExam(cfg) {
   let res; try { res = await API('/api/next?' + p); } catch (e) { return fatal(e); }
   if (!res.cards.length) { app.innerHTML = `<div class="empty"><div class="big">📭</div><h2>该范围没有可组的新题</h2>
     <div class="row"><a class="btn" href="#/exam">返回</a></div></div>`; return; }
-  const reveal = await Promise.all(res.cards.map(c => API('/api/question?id=' + c.id).then(d => d.card)));
+  /* 逐题取完整卡片：模考要一次性拉整套解析，Pi 上可能要几秒，必须报进度 */
+  const totalQ = res.cards.length;
+  let doneQ = 0;
+  loading(`组卷中… 正在调取题目 0/${totalQ}`);
+  let reveal;
+  try {
+    reveal = await Promise.all(res.cards.map(c => API('/api/question?id=' + c.id).then(d => {
+      doneQ++;
+      loading(`组卷中… 正在调取题目 ${doneQ}/${totalQ}`);
+      return d.card;
+    })));
+  } catch (e) { return fatal(e); }
   state.exam = {
     items: reveal.map(c => ({ card: c, chosen: null })),
     cur: 0, total: reveal.length,
@@ -1117,7 +1444,16 @@ async function examSubmit(auto) {
   E.submitted = true; clearInterval(E.timer);
   const used = Math.round((E.minutes * 60 * 1000 - Math.max(0, E.deadline - Date.now())) / 1000);
   const items = E.items.map(x => ({ id: x.card.id, correct: !!(x.chosen && x.chosen === x.card.answer) }));
-  let res; try { res = await POST('/api/exam/submit', { title: E.title, duration: used, items }); } catch (e) { return fatal(e); }
+  showMask('正在判分并写入记忆曲线…');
+  let res;
+  try { res = await POST('/api/exam/submit', { title: E.title, duration: used, items }); }
+  catch (e) {
+    hideMask(); E.submitted = false;
+    if (E.deadline > Date.now()) E.timer = setInterval(examTick, 1000);
+    toast('交卷没成功：' + (e && e.message ? e.message : e) + '　请再点一次「交卷」', 'bad');
+    return;
+  }
+  hideMask();
   const answered = E.items.filter(x => x.chosen).length;
   app.innerHTML = `
   <div class="exam-result card">
@@ -1220,9 +1556,14 @@ async function viewStats() {
       <div class="sub" style="margin:4px 0 0">正确率 ${r.acc}%</div>
     </div>`).join('') || '<div class="sub">还没有练过错题，暂无薄弱点</div>'}
   </div>`;
-  document.getElementById('g-set').onclick = async () => {
+  document.getElementById('g-set').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
     const v = +document.getElementById('g-in').value || 20;
-    await POST('/api/goal', { value: v }); viewStats();
+    const restore = busyBtn(b, '保存中…');
+    try { await POST('/api/goal', { value: v }); }
+    catch (err) { restore(); toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); return; }
+    viewStats();
   };
 }
 
@@ -1245,6 +1586,15 @@ function viewSettings() {
     <div class="row" style="justify-content:space-between;margin:14px 0">
       <span>专注模式（隐藏侧栏，居中窄列）</span>
       <button class="btn ghost" id="st-focus"></button>
+    </div>
+  </div>
+  <div class="card" style="max-width:640px;margin-top:16px">
+    <h2 style="margin-top:0">刷题</h2>
+    <div class="row" style="justify-content:space-between;gap:12px;margin:14px 0">
+      <span>评分后自动下一题<br><span class="sub" style="margin:4px 0 0">手机上也可以直接向左滑动切题</span></span>
+      <select id="st-autonext" style="flex:0 0 148px">
+        ${[0, 5, 8, 12].map(s => `<option value="${s}" ${autoNextSec() === s ? 'selected' : ''}>${s ? s + ' 秒后自动' : '不自动，手动继续'}</option>`).join('')}
+      </select>
     </div>
   </div>
   <div class="card" style="max-width:640px;margin-top:16px">
@@ -1289,26 +1639,47 @@ function viewSettings() {
   const fbtn = document.getElementById('st-focus');
   const syncFocus = () => { fbtn.textContent = isFocus() ? '已开启 · 关闭' : '已关闭 · 开启'; fbtn.className = 'btn ' + (isFocus() ? 'ok' : 'ghost'); };
   syncFocus(); fbtn.onclick = () => { setFocus(!isFocus()); syncFocus(); };
+  const anSel = document.getElementById('st-autonext');
+  if (anSel) anSel.onchange = () => setAutoNext(+anSel.value || 0);
   API('/api/streak').then(s => {
     document.getElementById('st-goal').value = s.goal;
     document.getElementById('st-goal-cur').textContent = '今日 ' + s.today + '/' + s.goal;
   });
-  document.getElementById('st-goal-save').onclick = async () => {
+  document.getElementById('st-goal-save').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
     const v = +document.getElementById('st-goal').value || 20;
-    await POST('/api/goal', { value: v });
-    const s = await API('/api/streak'); document.getElementById('st-goal-cur').textContent = '今日 ' + s.today + '/' + s.goal;
-    alert('已保存每日目标：' + v + ' 题');
+    const restore = busyBtn(b, '保存中…');
+    try {
+      await POST('/api/goal', { value: v });
+      const s = await API('/api/streak');
+      document.getElementById('st-goal-cur').textContent = '今日 ' + s.today + '/' + s.goal;
+      toast('已保存每日目标：' + v + ' 题');
+    } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
   };
   // 功能5：导出 / 功能6：账号管理
-  document.getElementById('st-exp-wb').onclick = async () => {
-    const d = await API('/api/export/wrongbook');
-    if (!d.text) { alert('当前账号还没有错题'); return; }
-    downloadMd(d.filename, d.text);
+  document.getElementById('st-exp-wb').onclick = async (e) => {
+    const b = e.currentTarget;
+    const restore = busyBtn(b, '导出中…');
+    try {
+      const d = await API('/api/export/wrongbook');
+      if (!d.text) { toast('当前账号还没有错题'); return; }
+      downloadMd(d.filename, d.text);
+      toast('已生成 ' + d.filename);
+    } catch (err) { toast('导出失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
   };
-  document.getElementById('st-exp-note').onclick = async () => {
-    const d = await API('/api/export/notes');
-    if (!d.text) { alert('当前账号还没有笔记'); return; }
-    downloadMd(d.filename, d.text);
+  document.getElementById('st-exp-note').onclick = async (e) => {
+    const b = e.currentTarget;
+    const restore = busyBtn(b, '导出中…');
+    try {
+      const d = await API('/api/export/notes');
+      if (!d.text) { toast('当前账号还没有笔记'); return; }
+      downloadMd(d.filename, d.text);
+      toast('已生成 ' + d.filename);
+    } catch (err) { toast('导出失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
   };
   const su = document.getElementById('st-user'); if (su) su.textContent = ME ? (ME.name || ME.username) : '未登录';
   const anon = !!(ME && ME.anon);
@@ -1343,11 +1714,14 @@ function upgradeAccount() {
     const username = $('up-user').value.trim();
     const password = $('up-pw').value;
     if (!username || password.length < 6) { alert('用户名不能为空，密码至少 6 位'); return; }
+    const go = $('up-go');
+    if (go.disabled) return;
+    const restore = busyBtn(go, '正在升级…');
     try {
       const r = await POST('/api/auth/upgrade', { username, password });
-      if (!r.ok) { alert(r.error || '升级失败'); return; }
+      if (!r.ok) { restore(); alert(r.error || '升级失败'); return; }
       onLoginOk(r); box.remove(); location.reload();
-    } catch (e) { alert('操作失败：' + e); }
+    } catch (e) { restore(); alert('操作失败：' + e); }
   };
   $('up-user').focus();
 }
@@ -1428,13 +1802,16 @@ function showLogin(msg) {
     const username = $('lg-user').value.trim();
     const password = $('lg-pw').value;
     if (!username || !password) { alert('请输入用户名和密码'); return; }
+    const go = $('lg-go');
+    if (go.disabled) return;
+    const restore = busyBtn(go, mode === 'reg' ? '注册中…' : '登录中…');
     try {
       if (mode === 'reg') {
         const r = await fetch('/api/auth/register', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password, name: $('lg-name').value.trim() }),
         }).then(r => r.json());
-        if (!r.ok) { alert(r.error || '注册失败'); return; }
+        if (!r.ok) { restore(); alert(r.error || '注册失败'); return; }
         onLoginOk(r); box.remove(); location.reload();
       } else {
         const r = await fetch('/api/auth/login', {
@@ -1442,21 +1819,24 @@ function showLogin(msg) {
           body: JSON.stringify({ username, password }),
         }).then(r => r.json());
         if (r.need_password) { box.remove(); return showSetPassword(username); }
-        if (!r.ok) { alert(r.error || '登录失败'); return; }
+        if (!r.ok) { restore(); alert(r.error || '登录失败'); return; }
         onLoginOk(r); box.remove(); location.reload();
       }
-    } catch (e) { alert('操作失败：' + e); }
+    } catch (e) { restore(); alert('操作失败：' + e); }
   };
   $('lg-go').onclick = submit;
   $('lg-pw').onkeydown = e => { if (e.key === 'Enter') submit(); };
   $('lg-guest').onclick = async () => {
+    const g = $('lg-guest');
+    if (g.disabled) return;
+    const restore = busyBtn(g, '正在创建游客身份…');
     try {
       const r = await fetch('/api/auth/guest', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       }).then(r => r.json());
-      if (!r.ok) { alert(r.error || '进入游客模式失败'); return; }
+      if (!r.ok) { restore(); alert(r.error || '进入游客模式失败'); return; }
       onLoginOk(r); box.remove(); location.reload();
-    } catch (e) { alert('操作失败：' + e); }
+    } catch (e) { restore(); alert('操作失败：' + e); }
   };
   $('lg-user').focus();
 }
@@ -1479,14 +1859,19 @@ function showSetPassword(username) {
     const username2 = $('sp-user').value.trim();
     const password = $('sp-pw').value;
     if (!username2 || password.length < 6) { alert('密码至少 6 位'); return; }
+    const go = $('sp-go');
+    if (go.disabled) return;
+    const restore = busyBtn(go, '正在设置…');
     let legacy_id = '';
     try { legacy_id = localStorage.getItem('kg_cur_user') || ''; } catch (e) { }
-    const r = await fetch('/api/auth/claim', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: username2, password, legacy_id }),
-    }).then(r => r.json());
-    if (!r.ok) { alert(r.error || '设置失败'); return; }
-    onLoginOk(r); box.remove(); location.reload();
+    try {
+      const r = await fetch('/api/auth/claim', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username2, password, legacy_id }),
+      }).then(r => r.json());
+      if (!r.ok) { restore(); alert(r.error || '设置失败'); return; }
+      onLoginOk(r); box.remove(); location.reload();
+    } catch (e) { restore(); alert('操作失败：' + e); }
   };
   $('sp-go').onclick = submit;
   $('sp-pw').onkeydown = e => { if (e.key === 'Enter') submit(); };
@@ -1535,15 +1920,21 @@ function changePassword() {
   $('cp-go').onclick = async () => {
     const old_password = $('cp-old').value, password = $('cp-new').value;
     if (password.length < 6) { alert('新密码至少 6 位'); return; }
-    const r = await POST('/api/auth/password', { old_password, password });
-    if (!r.ok) { alert(r.error || '修改失败'); return; }
-    onLoginOk(r); box.remove(); alert('密码已修改 ✓');
+    const go = $('cp-go');
+    if (go.disabled) return;
+    const restore = busyBtn(go, '提交中…');
+    try {
+      const r = await POST('/api/auth/password', { old_password, password });
+      if (!r.ok) { restore(); alert(r.error || '修改失败'); return; }
+      onLoginOk(r); box.remove(); toast('密码已修改 ✓');
+    } catch (e) { restore(); alert('操作失败：' + e); }
   };
 }
 
 /* 退出账号：清除本机登录凭证，数据仍安全保存在服务端 */
 async function logoutUser() {
   if (!confirm('退出当前账号？\n你的学习数据仍安全保存在服务器上，之后用用户名和密码即可重新登录。')) return;
+  showMask('正在退出…');
   await fetch('/api/auth/logout', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token: tok() }),
@@ -1558,8 +1949,14 @@ async function doDeleteUser() {
   if (!confirm('再次确认：此操作不可撤销，真的要删除吗？')) return;
   const password = prompt('请输入当前密码以确认删除：');
   if (password === null) return;
-  const r = await POST('/api/users/delete', { password });
-  if (!r.ok) { alert(r.error || '删除失败'); return; }
+  showMask('正在删除账号及其学习数据…');
+  try {
+    const r = await POST('/api/users/delete', { password });
+    if (!r.ok) { hideMask(); alert(r.error || '删除失败'); return; }
+  } catch (e) {
+    hideMask(); alert('操作失败：' + e); return;
+  }
+  hideMask();
   setTok(''); ME = null;
   location.reload();
 }

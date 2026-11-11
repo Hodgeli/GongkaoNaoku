@@ -93,22 +93,33 @@ def today():
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
-_APP_VER = {"v": None, "mtime": None}
+# 「到期复习」唯一口径：/api/stats 的计数、due_by_module、/api/next?mode=review 的抽题
+# 必须用同一套条件，否则会出现「总览说今日待复习 N 道、点进复习到期却是空的」。
+# 注意：这个池**不允许**再叠加 exclude（近期已练去重）——复习题本来就是练过的题。
+DUE_REVIEW_WHERE = "s.status!='new' AND s.due IS NOT NULL AND s.due<=?"
+
+_APP_VER = {"v": None, "sig": None}
 
 def app_ver():
-    """当前前端版本号：以 index.html 的 kg-app-ver 为唯一来源。"""
-    fp = os.path.join(STATIC, "index.html")
+    """前端资源版本号：由 static/app.js + style.css 的指纹自动生成。
+
+    以前版本号是 index.html 里手写的字符串，代码改了忘改版本号时，浏览器（尤其手机）
+    会按 max-age=30天 一直用旧脚本，出现「电脑正常、手机异常」。现在这两个文件一有改动
+    URL 就自动变化，任何设备都必须回源取新脚本。
+    """
+    files = ("app.js", "style.css")
     try:
-        mt = os.stat(fp).st_mtime
-        if _APP_VER["mtime"] == mt and _APP_VER["v"]:
-            return _APP_VER["v"]
-        with open(fp, encoding="utf-8") as f:
-            m = re.search(r'name="kg-app-ver"\s+content="([^"]+)"', f.read())
-        v = m.group(1) if m else "0"
-        _APP_VER.update(v=v, mtime=mt)
-        return v
+        sig = "|".join(
+            "%s:%x:%x" % (n, st.st_size, int(st.st_mtime))
+            for n, st in ((n, os.stat(os.path.join(STATIC, n))) for n in files)
+        )
     except Exception:
         return _APP_VER["v"] or "0"
+    if _APP_VER["sig"] == sig and _APP_VER["v"]:
+        return _APP_VER["v"]
+    v = hashlib.sha1(sig.encode()).hexdigest()[:10]
+    _APP_VER.update(v=v, sig=sig)
+    return v
 
 def q_one(sql, args=()):
     r = db().execute(sql, args).fetchone()
@@ -825,6 +836,29 @@ class Handler(BaseHTTPRequestHandler):
                     pass
         self._send(200, data, ctype, extra=extra, gz_key=(path, int(st.st_mtime)))
 
+    def _html_index(self):
+        """首页：把 ?v=<版本> 与 kg-app-ver 换成当前资源指纹后再下发。
+
+        版本号不再手写，改完 app.js / style.css 刷新即生效，杜绝手机端被 30 天强缓存钉在旧版本。
+        """
+        fp = os.path.join(STATIC, "index.html")
+        try:
+            with open(fp, "rb") as f:
+                data = f.read()
+            mt = os.stat(fp).st_mtime
+        except Exception:
+            return self._send(404, {"error": "not found"})
+        ver = app_ver()
+        vb = ver.encode()
+        data = re.sub(rb"\?v=[0-9A-Za-z_.\-]+", b"?v=" + vb, data)
+        data = re.sub(rb'(name="kg-app-ver"\s+content=")[^"]*(")', rb"\g<1>" + vb + rb"\g<2>", data)
+        etag = '"%s-html"' % ver
+        extra = {"Cache-Control": "no-cache", "ETag": etag,
+                 "Last-Modified": email.utils.formatdate(mt, usegmt=True)}
+        if (self.headers.get("If-None-Match") or "").strip('"') == etag.strip('"'):
+            return self._send(304, b"", extra=extra)
+        self._send(200, data, "text/html; charset=utf-8", extra=extra, gz_key=(fp, ver))
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(u.path)
@@ -832,7 +866,7 @@ class Handler(BaseHTTPRequestHandler):
         g = lambda k, d="": (qs.get(k) or [d])[0]
 
         if path == "/" or path == "/index.html":
-            return self._file(os.path.join(STATIC, "index.html"), cache=True, revalidate=True)
+            return self._html_index()
         if path == "/ops" or path == "/ops/":
             # 未配置口令 → 404，连"这里有个后台"都不暴露
             if not ops_enabled():
@@ -1011,7 +1045,8 @@ class Handler(BaseHTTPRequestHandler):
             learned = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND status!='new'", (uid,))["n"]
             total_q = q_total()
             due_new = max(0, total_q - learned)   # 没进度行的题都算新题，不必预铺行
-            due_rev = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND status!='new' AND due<=?", (uid, t))["n"]
+            due_rev = q_one(f"SELECT COUNT(*) n FROM srs s WHERE s.user_id=? AND {DUE_REVIEW_WHERE}",
+                            (uid, t))["n"]
             studied_today = q_one("SELECT COUNT(DISTINCT qid) n FROM reviews WHERE user_id=? AND date(ts)=?", (uid, t))["n"]
             wrong_n = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND wrong>0", (uid,))["n"]
             fav_n = q_one("SELECT COUNT(*) n FROM favorites WHERE user_id=?", (uid,))["n"]
@@ -1019,8 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
                               SUM(CASE WHEN s.qid IS NOT NULL AND s.status!='new' THEN 1 ELSE 0 END) learned
                               FROM qdb.questions q LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?
                               GROUP BY q.module""", (uid,))
-            due_by_mod = q_all("""SELECT q.module m, COUNT(*) n FROM srs s JOIN qdb.questions q ON q.qid=s.qid
-                                  WHERE s.user_id=? AND s.status!='new' AND s.due<=? GROUP BY q.module""", (uid, t))
+            due_by_mod = q_all(f"""SELECT q.module m, COUNT(*) n FROM srs s JOIN qdb.questions q ON q.qid=s.qid
+                                  WHERE s.user_id=? AND {DUE_REVIEW_WHERE} GROUP BY q.module""", (uid, t))
             mastery = q_all("SELECT interval FROM srs WHERE user_id=? AND status!='new'", (uid,))
             buckets = {"学习中": 0, "初记": 0, "短期": 0, "长期": 0, "稳固": 0}
             for r in mastery:
@@ -1047,6 +1082,9 @@ class Handler(BaseHTTPRequestHandler):
             # 不再依赖注册时预铺 2.7 万行空白记录（那是注册慢 + 写锁长的根源）
             J = "FROM qdb.questions q LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?"
             NEW = "(s.qid IS NULL OR s.status='new')"
+            # 带 srs_status 的列清单：前端据此判断「抽到的是新题还是复习题」，
+            # 只有新题才写进 kg_seen（近期已练去重名单），避免复习题污染新题去重。
+            SEL = "q.*, IFNULL(s.status,'new') AS srs_status"
             excl_clause = (f" AND q.qid NOT IN ({','.join('?' * len(excl_ids))})") if excl_ids else ""
             if mode == "ids":
                 # 按指定 id 取题（临时标记题复盘），保持传入顺序
@@ -1061,41 +1099,48 @@ class Handler(BaseHTTPRequestHandler):
             elif mode == "material":
                 rows = q_all("SELECT * FROM qdb.questions WHERE material_ref=? ORDER BY id LIMIT ?", (ref, size))
             elif mode == "fav":
-                rows = q_all(f"""SELECT q.* {J}
-                                WHERE q.qid IN (SELECT qid FROM favorites WHERE user_id=?){cond}{excl_clause}
-                                ORDER BY RANDOM() LIMIT ?""", (uid, uid, *ea, size))
+                rows = q_all(f"""SELECT {SEL} {J}
+                                WHERE q.qid IN (SELECT qid FROM favorites WHERE user_id=?){cond}
+                                ORDER BY RANDOM() LIMIT ?""", (uid, uid, *args, size))
             elif mode == "wrongredo":
-                # 错题专项重练：只抽「待重练」的错题，随机打散
-                rows = q_all(f"""SELECT q.* {J}
-                                WHERE s.wrong>0 AND IFNULL(s.wb_status,'active')='active'{cond}{excl_clause}
-                                ORDER BY RANDOM() LIMIT ?""", (uid, *ea, size))
+                # 错题专项重练：只抽「待重练」的错题，随机打散（不受 exclude 影响）
+                rows = q_all(f"""SELECT {SEL} {J}
+                                WHERE s.wrong>0 AND IFNULL(s.wb_status,'active')='active'{cond}
+                                ORDER BY RANDOM() LIMIT ?""", (uid, *args, size))
             elif mode == "wrong":
-                rows = q_all(f"""SELECT q.* {J}
-                                WHERE s.wrong>0{cond}{excl_clause} ORDER BY s.wrong DESC, s.ease ASC LIMIT ?""",
-                             (uid, *ea, size))
+                rows = q_all(f"""SELECT {SEL} {J}
+                                WHERE s.wrong>0{cond} ORDER BY s.wrong DESC, s.ease ASC LIMIT ?""",
+                             (uid, *args, size))
             elif mode == "review":
-                rows = q_all(f"""SELECT q.* {J}
-                                WHERE s.status!='new' AND s.due<=?{cond}{excl_clause}
-                                ORDER BY s.due ASC, s.ease ASC LIMIT ?""", (uid, today(), *ea, size))
+                # 到期复习：只按 SM-2 到期判断，绝不再套 exclude ——
+                # 到期题必然是「练过的题」，一旦被近期已练去重排除，复习页就会永远为空。
+                rows = q_all(f"""SELECT {SEL} {J}
+                                WHERE {DUE_REVIEW_WHERE}{cond}
+                                ORDER BY s.due ASC, s.ease ASC LIMIT ?""", (uid, today(), *args, size))
             elif mode == "mix":
                 # 重复练习题优先：答错 > 遗忘(lapses) > 到期复习（此池不受 exclude 限制，刚做错的也能立刻重练）；
                 # 新题仅作补充，且排除近期已练过的，避免无意义重复。
-                rows = q_all(f"""SELECT q.* {J}
-                                WHERE 1=1{cond} AND (s.wrong>0 OR s.lapses>0 OR (s.status!='new' AND s.due<=?))
+                rows = q_all(f"""SELECT {SEL} {J}
+                                WHERE 1=1{cond} AND (s.wrong>0 OR s.lapses>0 OR ({DUE_REVIEW_WHERE}))
                                 ORDER BY (CASE WHEN s.wrong>0 THEN 0 WHEN s.lapses>0 THEN 1 ELSE 2 END),
                                          s.due ASC, RANDOM() LIMIT ?""", (uid, today(), *args, size))
                 if len(rows) < size:
-                    fill = q_all(f"""SELECT q.* {J}
+                    fill = q_all(f"""SELECT {SEL} {J}
                                     WHERE 1=1{cond} AND {NEW}{excl_clause} ORDER BY RANDOM() LIMIT ?""",
                                  (uid, *ea, size - len(rows)))
                     rows += fill
             else:  # new / study / exam
-                rows = q_all(f"""SELECT q.* {J}
+                rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE {NEW}{cond}{excl_clause} ORDER BY RANDOM() LIMIT ?""", (uid, *ea, size))
             if rows:
                 ensure_srs_rows(uid, [r["qid"] for r in rows])   # 抽到的题补齐进度行（一次事务）
-            return self._send(200, {"mode": mode, "count": len(rows),
-                                    "cards": [clean_card(r, reveal=False) for r in rows]})
+            cards = []
+            for r in rows:
+                c_ = clean_card(r, reveal=False)
+                # is_new：让前端只把新题写进「近期已练」名单；无 srs_status 的分支（ids/material）按新题处理
+                c_["is_new"] = (r["srs_status"] == "new") if "srs_status" in r.keys() else True
+                cards.append(c_)
+            return self._send(200, {"mode": mode, "count": len(rows), "cards": cards})
 
         if path == "/api/question":
             uid = need_uid(g("token"))
