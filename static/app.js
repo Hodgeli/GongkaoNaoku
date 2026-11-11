@@ -758,7 +758,7 @@ async function doGrade(g) {
   }
   if (!ok) return;   // 保留评分按钮，让用户重试，避免"以为记下了其实丢了"
   refreshSide();
-  // 不自动跳题：先让用户看完解析再走（只换掉评分区，正文与解析保持原样）
+  // 前进方式见 autoNextSec()：默认评分后立即切题；设为「不自动」时才停在原题看解析
   S.graded = g;
   renderNextBar();
   saveSession();
@@ -780,10 +780,19 @@ function nextCard() {
   }).finally(() => { S.nxBusy = false; hideMask(); saveSession(); });
 }
 
-/* ---------- 评分后的前进操作条 ---------- */
+/* ---------- 评分后的前进方式 ----------
+   -1 = 立即切题（默认，与 Anki 一致：评完直接下一张）
+    0 = 不自动，留在原题看完解析再手动点「下一题」
+   >0 = 延迟 N 秒自动切题，期间可点按钮提前继续 */
 let NX_TIMER = null;
 function autoNextSec() {
-  try { return Math.max(0, Math.min(60, +localStorage.getItem('kg_autonext') || 0)); } catch (e) { return 0; }
+  try {
+    const v = localStorage.getItem('kg_autonext');
+    if (v === null || v === '') return -1;   // 没设置过 → 默认评分后立即下一题
+    const n = +v;
+    if (!isFinite(n) || n < 0) return -1;
+    return Math.min(60, Math.floor(n));
+  } catch (e) { return -1; }
 }
 function setAutoNext(v) { try { localStorage.setItem('kg_autonext', String(v)); } catch (e) { } }
 /* 操作条是移动端的固定底栏，切题/离开页面时必须撤掉，否则会盖在别的页面上 */
@@ -795,8 +804,10 @@ function clearNextBar() {
 function renderNextBar() {
   const box = document.getElementById('act'); if (!box) return;
   const S = state.session;
-  const last = S.idx >= S.queue.length - 1;
   const auto = autoNextSec();
+  /* 立即切题：不留操作条，评分落地后直接进下一题（解析在评分前就已经看过） */
+  if (auto < 0) { clearNextBar(); nextCard(); return; }
+  const last = S.idx >= S.queue.length - 1;
   box.innerHTML = `<div class="grade nextbar">
     <span class="nx-tip" id="nx-tip">已记录 · 看完解析再继续</span>
     <button class="btn ok nx-go">${last ? '完成本组 →' : '下一题 →'} <small>空格</small></button>
@@ -1584,9 +1595,10 @@ function viewSettings() {
   <div class="card" style="max-width:640px;margin-top:16px">
     <h2 style="margin-top:0">刷题</h2>
     <div class="row" style="justify-content:space-between;gap:12px;margin:14px 0">
-      <span>评分后自动下一题<br><span class="sub" style="margin:4px 0 0">手机上也可以直接向左滑动切题</span></span>
-      <select id="st-autonext" style="flex:0 0 148px">
-        ${[0, 5, 8, 12].map(s => `<option value="${s}" ${autoNextSec() === s ? 'selected' : ''}>${s ? s + ' 秒后自动' : '不自动，手动继续'}</option>`).join('')}
+      <span>评分后自动下一题<br><span class="sub" style="margin:4px 0 0">默认评完立即切题；想看完解析再走可选「不自动」。手机也可向左滑动切题</span></span>
+      <select id="st-autonext" style="flex:0 0 168px">
+        ${[[-1, '立即（评分后马上切题）'], [0, '不自动，手动继续'], [5, '5 秒后自动'], [8, '8 秒后自动'], [12, '12 秒后自动']]
+          .map(([v, t]) => `<option value="${v}" ${autoNextSec() === v ? 'selected' : ''}>${t}</option>`).join('')}
       </select>
     </div>
   </div>
@@ -1633,7 +1645,7 @@ function viewSettings() {
   const syncFocus = () => { fbtn.textContent = isFocus() ? '已开启 · 关闭' : '已关闭 · 开启'; fbtn.className = 'btn ' + (isFocus() ? 'ok' : 'ghost'); };
   syncFocus(); fbtn.onclick = () => { setFocus(!isFocus()); syncFocus(); };
   const anSel = document.getElementById('st-autonext');
-  if (anSel) anSel.onchange = () => setAutoNext(+anSel.value || 0);
+  if (anSel) anSel.onchange = () => setAutoNext(+anSel.value);
   API('/api/streak').then(s => {
     document.getElementById('st-goal').value = s.goal;
     document.getElementById('st-goal-cur').textContent = '今日 ' + s.today + '/' + s.goal;
