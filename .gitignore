@@ -5,6 +5,10 @@ users.db
 *.db.bak*
 *.sqlite
 *.sqlite3
+# 由分卷合并出来的运行时题库（assemble_db.py 生成，不入库）
+/kaogong.db
+# 本地改动备份目录
+.bak/
 
 # ---------- 题库配图 90-图片/ 随仓库提供（单文件小、总量大，走普通 git） ----------
 
@@ -40,3 +44,6 @@ Thumbs.db
 
 # 离线健康快检结果（由 check_integrity.py 生成，不入库）
 kaogong-integrity.json
+
+# 本地变更记录（不入库）
+/CHANGELOG.md
