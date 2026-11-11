@@ -590,9 +590,8 @@ function renderCard() {
     e.currentTarget.classList.toggle('on', !on);
     e.currentTarget.textContent = on ? '⚑ 标记' : '⚑ 已标记';
   };
-  // 功能2：单题限时倒计时
-  const answerable = S.mode !== 'review';
-  if (S.limitOn && answerable && S.phase === 'question') {
+  // 功能2：单题限时倒计时（复习到期也要自己作答，因此和新题一样受单题限时约束）
+  if (S.limitOn && S.phase === 'question') {
     const sec = (S.limits && S.limits[c.module]) || LIMIT_DEFAULT[c.module] || 45;
     startLimitTimer(sec);
   } else {
@@ -606,12 +605,10 @@ function renderOptions() {
   const S = state.session, c = S.queue[S.idx], box = document.getElementById('opts');
   const rev = S.full;
   const opts = rev ? rev.options : c.options;
-  const answerable = S.mode !== 'review';
+  /* 所有模式（含复习到期）都是「先看选项、自己作答、再看答案解析」：
+     复习流程与新题完全一致，记忆更新仍只由四档自评决定，选项只用于判对错展示。 */
   if (!opts || !opts.length) { box.innerHTML = ''; }
-  else if (!answerable && S.phase === 'question') {
-    box.innerHTML = `<div class="row"><button class="btn" id="btn-reveal">🧠 先回忆，然后点击显示选项与答案</button></div>`;
-    document.getElementById('btn-reveal').onclick = doReveal;
-  } else {
+  else {
     box.innerHTML = `<div class="opts">` + opts.map(o => {
       let cls = 'opt';
       if (S.phase === 'answer') {
@@ -619,13 +616,13 @@ function renderOptions() {
         if (S.chosen === o.key && !o.is_answer) cls += ' wrong';
         if (S.chosen === o.key && o.is_answer) cls += ' correct';
       }
-      const clickable = (answerable && S.phase === 'question');
+      const clickable = (S.phase === 'question');
       return `<div class="${cls}" ${clickable ? `data-key="${o.key}"` : ''}>
         <span class="k">${o.key}</span><span class="body">${o.html || esc(o.label)}</span>
         ${S.phase === 'answer' && o.is_answer ? '<span style="color:var(--ok);font-weight:800">✔ 正确</span>' : ''}
       </div>`;
     }).join('') + `</div>`;
-    if (answerable && S.phase === 'question') {
+    if (S.phase === 'question') {
       box.querySelectorAll('.opt').forEach(el => el.onclick = () => { S.chosen = el.dataset.key; doReveal(); });
     }
   }
@@ -634,22 +631,21 @@ function renderOptions() {
 
 function renderAct() {
   const S = state.session; const act = document.getElementById('act'); if (!act) return;
-  const answerable = S.mode !== 'review';
   if (S.phase === 'question') {
-    if (answerable) act.innerHTML = `<p class="sub" style="margin-top:14px">👆 点击上方选项作答</p>`;
+    act.innerHTML = `<p class="sub" style="margin-top:14px">👆 点击上方选项作答</p>`;
     return;
   }
   const f = S.full;
-  const isRight = answerable ? (S.chosen === f.answer) : null;
-  if (answerable) { S.tally.done++; if (isRight) S.tally.right++; else S.tally.wrong++; }
+  const isRight = S.chosen === f.answer;
+  S.tally.done++; if (isRight) S.tally.right++; else S.tally.wrong++;
   act.innerHTML = `
     <div class="qtools">
       <button class="qtool ${f.fav ? 'on' : ''}" id="t-fav">${f.fav ? '★ 已收藏' : '☆ 收藏'}</button>
       <button class="qtool" id="t-note">📝 笔记</button>
       <button class="qtool" id="t-detail">🔍 完整标注</button>
     </div>
-    <div class="answer-line ${answerable ? (isRight ? 'right' : 'wrong') : ''}">
-      ${!answerable ? '正确答案：<b>' + esc(f.answer) + '</b>' : (isRight ? '✓ 答对了，正确答案 ' + esc(f.answer) : '✗ 答错了，正确答案是 ' + esc(f.answer) + '，你选了 ' + esc(S.chosen || '—'))}
+    <div class="answer-line ${isRight ? 'right' : 'wrong'}">
+      ${isRight ? '✓ 答对了，正确答案 ' + esc(f.answer) : '✗ 答错了，正确答案是 ' + esc(f.answer) + '，你选了 ' + esc(S.chosen || '—')}
     </div>
     <div id="note-area"></div>
     <div class="reveal">
@@ -726,8 +722,6 @@ async function doReveal() {
   S.revealing = true;
   stopLimitTimer();
   optionBusy();
-  const rbtn = document.getElementById('btn-reveal');
-  const restoreR = rbtn ? busyBtn(rbtn, '正在调取答案…') : null;
   try {
     const d = await API('/api/question?id=' + c.id);
     S.full = d.card;
@@ -735,7 +729,6 @@ async function doReveal() {
     renderOptions();
   } catch (e) {
     optionBusyEnd();
-    if (restoreR) restoreR();
     toast('解析没能加载出来：' + (e && e.message ? e.message : e) + '　请再点一次选项', 'bad');
   } finally {
     clearInterval(OPT_SLOW); OPT_SLOW = null;
@@ -951,12 +944,12 @@ document.addEventListener('keydown', (e) => {
   const S = state.session;
   if (S && document.getElementById('opts')) {
     if (e.target && (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT')) return;
-    const answerable = S.mode !== 'review';
+    /* 复习到期与新题一致：A/B/C/D 选答案（空格只用于「已评分后进入下一题」） */
     if (S.phase === 'question') {
-      if (answerable && 'ABCD'.includes(e.key.toUpperCase())) {
+      if ('ABCD'.includes(e.key.toUpperCase())) {
         const o = S.queue[S.idx].options.find(x => x.key.toUpperCase() === e.key.toUpperCase());
         if (o) { S.chosen = o.key; doReveal(); }
-      } else if ((e.key === ' ' || e.key === 'Enter') && !answerable) { e.preventDefault(); doReveal(); }
+      }
     } else if (S.phase === 'answer') {
       if (S.graded) {   // 已评分：空格/回车进入下一题
         if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); nextCard(); }
