@@ -39,7 +39,7 @@ git clone https://github.com/Hodgeli/GongkaoNaoku.git
 - [本 fork 相对源仓库改了什么](#本-fork-相对源仓库改了什么)
 - [为什么不是直接刷题](#为什么不是直接刷题)
 - [快速开始](#快速开始)
-- [应用一览](#应用一览)
+- [一次完整的复习长什么样](#一次完整的复习长什么样)
 - [功能地图](#功能地图)
 - [每道题都带什么](#每道题都带什么)
 - [记忆引擎：FSRS-5 怎么运作](#记忆引擎fsrs-5-怎么运作)
@@ -111,36 +111,18 @@ python3 parse.py
 配图另跑一次 `python3 img2webp.py`（可中断重跑，已转换的会自动跳过；这个脚本需要 Pillow，只影响导入流程，不影响运行）。
 </details>
 
-## 应用一览
+## 一次完整的复习长什么样
 
-> 以下为实际运行截图（暗色主题，演示账号数据，WebP 格式，共 17 张）。
+四步说清楚：
 
-| | |
-| :---: | :---: |
-| **总览面板** — 今日任务、六模块进度、掌握度分布 | **登录 / 注册 — 支持免注册游客模式** |
-| ![总览面板](docs/screenshots/02-dashboard.webp) | ![登录注册](docs/screenshots/01-login.webp) |
-| **练习答题 — 逐题作答，正确/错误即时高亮** | **复习到期 — FSRS-5 记忆引擎推送的当日队列** |
-| ![练习答题](docs/screenshots/04-study-question.webp) | ![复习到期](docs/screenshots/05-review.webp) |
-| **真题浏览 — 地区 / 年份 / 关键字全量筛选** | **考点导航 — 跨省份同类考法横向对比** |
-| ![真题浏览](docs/screenshots/06-browse.webp) | ![考点导航](docs/screenshots/07-kadian.webp) |
-| **错题本 — 答错自动收集，稳定后自然淡出** | **我的收藏 — 重点易错题集中练** |
-| ![错题本](docs/screenshots/08-wrongbook.webp) | ![我的收藏](docs/screenshots/09-favorites.webp) |
-| **模拟考试 — 限时整卷配置** | **模考进行中 — 倒计时 + 题号跳转 + 即时判分** |
-| ![模拟考试](docs/screenshots/10-exam-config.webp) | ![模考进行中](docs/screenshots/11-exam-running.webp) |
-| **材料组题 — 资料分析按同段材料成组（702 组标准 5 题组）** | **疑点复核 — 官方解析存疑题逐条核验** |
-| ![材料组题](docs/screenshots/12-materials.webp) | ![疑点复核](docs/screenshots/13-doubts.webp) |
-| **数据统计 — 打卡 / 热力图 / 正确率 / 薄弱考点** | **题目详情 — 审题路径 · 最快解法 · 易错坑** |
-| ![数据统计](docs/screenshots/14-stats.webp) | ![题目详情](docs/screenshots/16-detail.webp) |
-| **设置 — 账号 / 每日目标与上限 / 数据管理** | **亮色主题 — 暗色 / 亮色 / 跟随系统 三态** |
-| ![设置](docs/screenshots/15-settings.webp) | ![亮色主题](docs/screenshots/17-dashboard-light.webp) |
+1. **首页**：顶上是今日任务——待复习 N 道、未学新题 M 道、今日已练、错题本与收藏数；左边栏六个模块的进度条，下面是掌握度分布（学习中 / 初记 / 短期 / 长期 / 稳固）。
+2. **进「复习到期」**：直接出题。题目上方是面包屑（模块 / 地区+年份 / 考点）与「标记」「查看完整标注」；资料分析题会先展开「给定材料」，可折叠；下面是题干与 A–D 选项。
+3. **自己作答**：点选项即判对错——选对的选项变绿并标「✔ 正确」，选错的变红、正确项同时高亮；随后展开「问法模型 / 推理链 / ⚡最快解法 / ⚠易错点 / 🧩母题抽象 / 官方解析」，工具栏可收藏、写笔记、看完整标注。
+4. **四档自评**：忘记 / 困难 / 一般 / 熟悉。评完立刻跳下一题，6 秒内可撤销；评「忘记」时这道题会被插回队列第 3 题之后，几分钟内真的会再见到。
 
-<details>
-<summary><b>更多界面：练习范围配置（模块 / 大类 / 考点关键字）</b></summary>
+其余视图都是这个流程的变体：错题本、我的收藏、材料组题、疑点复核、考点导航只是换一个「题池」；模拟考试沿用同一套作答界面，另加顶部倒计时与题号跳转；数据统计与设置各自独立。
 
-<p align="center">
-  <img src="docs/screenshots/03-study-config.webp" alt="练习范围配置" width="720">
-</p>
-</details>
+外观支持暗色 / 亮色 / 跟随系统三态、字号 14–19px 可调、专注模式（隐藏侧栏、居中窄列）。
 
 ## 功能地图
 
@@ -306,7 +288,7 @@ GongkaoNaoku/
 ├─ 设计说明.md             开发文档：表结构、接口、算法、修复史
 ├─ .gitattributes         换行符与二进制处理规则
 ├─ ops/index.html         运营面板（只读数据看板）
-├─ docs/                  README 用的 Logo 与截图
+├─ docs/logo.webp         README 头部 Logo
 ├─ 90-图片/                题库配图（39,692 张 WebP，随仓库提供）
 └─ static/                 前端 SPA
    ├─ index.html
