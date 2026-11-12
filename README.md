@@ -14,7 +14,7 @@
 ![存储](https://img.shields.io/badge/存储-SQLite%20单文件-blue)
 ![前端](https://img.shields.io/badge/前端-原生%20JS%20SPA-orange)
 ![许可](https://img.shields.io/badge/许可-仅供个人学习-lightgrey)
-![版本](https://img.shields.io/badge/版本-v1.4.1-2EA043)
+![版本](https://img.shields.io/badge/版本-v1.5.0-2EA043)
 
 📚 题库与蒸馏方法来自开源项目 [ERRRC/xingcezhenti](https://github.com/ERRRC/xingcezhenti)（515 卷 / 58,890 题行），本项目在其基础上**逐题去重为 27,506 道**，并做结构化深度标注与 SM-2 复习排程
 
@@ -40,7 +40,7 @@
 
 ## 更新日志
 
-> 最新：**v1.4.1** — 评分后默认**立即切到下一题**（设置→刷题可改为「不自动」或延迟 5 / 8 / 12 秒）。v1.4.0：复习到期改为与做新题一致的作答流程（先看选项自己作答，再看正确答案与解析，最后自评熟悉度）。
+> 最新：**v1.5.0** — 模考改为从全库随机组卷（含已学题）、离开页面自动停表、跳过不答不再记入记忆曲线；评分后支持 6 秒内「撤销」；图片懒加载与侧栏刷新合并。v1.4.1：评分后默认立即切到下一题。v1.4.0：复习到期改为与做新题一致的作答流程。
 > 完整版本说明见 [CHANGELOG.md](CHANGELOG.md) ｜ [Releases](https://gitee.com/jangviktor/GongkaoNaoku/releases)
 
 ## 目录
