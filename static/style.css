@@ -14,7 +14,7 @@
   --surface-2:    oklch(96.6% 0.011 84);   /* 卡片内嵌块 */
   --ink:          oklch(23% 0.018 65);     /* 主文字：暖墨黑 */
   --ink-2:        oklch(42% 0.016 65);     /* 次级文字 */
-  --ink-3:        oklch(56% 0.014 65);     /* 弱文字/元信息 */
+  --ink-3:        oklch(51.5% 0.014 65);   /* 弱文字/元信息：56% 时对纸底只有 4.18:1，压到 51.5% 才过 4.5 */
   --rule:         oklch(89% 0.012 78);     /* 分隔线 */
   --rule-2:       oklch(83% 0.014 78);     /* 强调分隔线 */
 
@@ -377,6 +377,43 @@ html[data-theme="dark"] .exam-dot.answered{background:oklch(28% 0.032 253)}
 .acc-row .pct{min-width:84px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
 .chipset{display:flex;gap:var(--s2);flex-wrap:wrap;margin-bottom:var(--s4)}
 
+/* ===== 统计图表：遗忘曲线 / 目标日历 / 考点趋势 ===== */
+.chart{width:100%;height:auto;display:block;overflow:visible}
+.chart-legend{display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12.5px;
+  color:var(--ink-2);margin-bottom:10px}
+.chart-legend span{display:inline-flex;align-items:center;gap:6px}
+.lg-line{display:inline-block;width:18px;height:3px;border-radius:2px}
+.lg-line.dashed{background:none!important;border-top:3px dashed var(--ink-3)}
+
+/* 目标达成日历：7 行 × N 列（周一起） */
+.cal-grid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,15px);gap:3px;
+  width:max-content;overflow:auto;padding-bottom:2px}
+.cal-cell{width:15px;height:15px;border-radius:3px;background:var(--paper-2)}
+.cal-cell.ok{background:var(--ok)}
+.cal-cell.part{background:color-mix(in oklch, var(--ok) 38%, var(--paper-2))}
+.cal-cell.none{background:var(--paper-2);box-shadow:inset 0 0 0 1px var(--rule)}
+.cal-cell.blank{background:transparent}
+.cal-grid .cal-cell:hover{outline:2px solid var(--brand);outline-offset:1px}
+.heat-legend .cal-cell{display:inline-block;vertical-align:-2px;margin-right:4px}
+
+/* 考点趋势：名称 + 迷你折线 + 正确率 */
+.trend-row{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid var(--rule)}
+.trend-row:last-of-type{border-bottom:none}
+.trend-name{flex:0 0 150px;font-size:13.5px;color:var(--ink);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.spark{flex:1 1 auto;height:26px;min-width:120px;overflow:visible}
+.trend-acc{flex:0 0 52px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;font-weight:600}
+.trend-n{flex:0 0 58px;text-align:right;font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+/* 手机上名称 150 + 折线 120 + 两个数字 110 + 间距 36 = 416px，会把布局视口撑宽，
+   整页被浏览器缩到 0.88 倍。收窄各列，让它在 390px 内排得下。 */
+@media(max-width:560px){
+  .trend-row{gap:8px}
+  .trend-name{flex:0 0 86px;font-size:12.5px}
+  .spark{min-width:56px}
+  .trend-acc{flex:0 0 44px;font-size:12.5px}
+  .trend-n{flex:0 0 44px;font-size:11.5px}
+}
+
 /* ===== 全文搜索 ===== */
 /* 命中片段由后端拼好 HTML（已转义，只含 <mark>），前端直接插入 */
 .s-hit{cursor:pointer;transition:.18s var(--ease)}
@@ -489,6 +526,29 @@ html[data-focus="1"] .focus-exit:hover{color:var(--ink);border-color:var(--brand
 /* ===== 触屏设备：没有空格键，不显示快捷键提示 ===== */
 @media(hover:none){
   .grade.nextbar .nx-go small{display:none}
+}
+
+/* ===== 触屏：点击目标放大到 44px 以上 ===== */
+/* 用 pointer:coarse 而不是宽度断点 —— 平板横屏也不该给鼠标尺寸的小按钮，
+   而窄窗口的桌面浏览器不该被强制放大。44px 是 iOS HIG 与 Material 的共识下限。 */
+@media(pointer:coarse){
+  .btn{min-height:44px;padding:11px 18px}
+  .btn.big{min-height:52px}
+  .btn.sm{min-height:38px;padding:8px 14px}
+  .seg button{min-height:42px;padding:9px 16px}
+  .qtool{min-width:44px;min-height:44px}
+  #nav a{min-height:44px;display:flex;align-items:center;padding:11px 14px}
+  .theme-btn{min-width:44px;min-height:44px}
+  .user-chip{min-height:44px}
+  .opt{min-height:56px;padding:15px 14px}
+  .opt .k{min-width:26px;font-size:1.05rem}
+  select,input{min-height:44px}
+  /* 答题卡的小圆点：桌面上 30px 够用，手指按容易点偏 */
+  .exam-dot{min-width:38px;height:38px}
+  .cal-cell{width:17px;height:17px}
+  .cal-grid{grid-template-rows:repeat(7,17px)}
+  /* 触屏没有 hover，靠 :active 给一点按下的反馈 */
+  .btn:active,.opt:active,#nav a:active{transform:scale(.985)}
 }
 
 /* ===== 打印 / 减少动效偏好 ===== */

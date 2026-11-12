@@ -25,11 +25,17 @@ let HEALING = false;
   } catch (e) { }
 })();
 
-/* 注册 Service Worker：让页面导航与 js/css 一律重新校验网络，
-   彻底摆脱本机 HTTP 缓存里的旧版本（仅 https 下生效，失败不影响正常使用）。 */
+/* 注册 Service Worker：导航走网络优先（不吃旧版本），静态资源带 ?v= 走缓存优先，
+   断网时用缓存的壳打开。**只缓存壳，不缓存 /api/**。
+   生效条件：https，或本机的 localhost/127.0.0.1 —— 后者本身就是安全上下文，
+   否则本地跑起来永远用不上离线能力（也没法验证）。 */
 (function regSW() {
   try {
-    if (!('serviceWorker' in navigator) || location.protocol !== 'https:') return;
+    if (!('serviceWorker' in navigator)) return;
+    const h = location.hostname;
+    const ok = location.protocol === 'https:' ||
+      h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+    if (!ok) return;
     navigator.serviceWorker.register('/sw.js').catch(() => { });
   } catch (e) { }
 })();
@@ -300,6 +306,22 @@ function abandonExam() {
 function loading(t) { loadingView(t); }
 function fatal(e) { app.innerHTML = `<div class="card" style="border-color:var(--bad)">出错了：${esc(String(e))}
   <div class="row" style="margin-top:14px"><button class="btn ghost" onclick="location.reload()">重试</button></div></div>`; }
+
+/* 离线态：Service Worker 把壳（html/css/js）缓存下来了，所以断网也能打开页面，
+   但题目、进度、账号都在服务端的 /api 里 —— 那些一律不缓存（缓存出来的进度会骗人）。
+   所以这里给一张明确的说明 + 自动重试，而不是一个转不停的转圈。 */
+function offlineScreen() {
+  app.innerHTML = `<div class="empty"><div class="big">📴</div><h2>现在没有网络</h2>
+    <p class="sub">页面是从本地缓存打开的，但题库和学习进度都在服务端，需要联网才能继续。<br>
+      恢复网络后会自动重试。</p>
+    <div class="row" style="justify-content:center;margin-top:18px">
+      <button class="btn" id="off-retry">重新连接</button>
+    </div></div>`;
+  const retry = () => { if (navigator.onLine !== false) location.reload(); };
+  const b = document.getElementById('off-retry');
+  if (b) b.onclick = retry;
+  window.addEventListener('online', retry, { once: true });
+}
 
 /* ---------- 统一的加载反馈 ----------
    Pi 上单个接口可能要几百毫秒到数秒。任何一次点击都必须在 100ms 内出现可见变化，
@@ -2078,11 +2100,125 @@ async function examSnapQ(qid) {
   box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+
+/* ---------- stats 图表：遗忘曲线 / 目标日历 / 考点趋势 ---------- */
+/* 全部手写内联 SVG，不引图表库 —— 整个前端是零依赖的，为三张小图引入
+   几百 KB 的 echarts 不值当；而且这些图要跟主题色变量走，手写反而更省事。 */
+
+function forgetChart(d) {
+  const bs = (d && d.buckets) || [];
+  if (!bs.length) {
+    return `<div class="card"><div class="sub" style="margin:0">还没有可用的复习记录。<br>
+      遗忘曲线只统计「间隔 ≥1 天」的复习 —— 同一天内反复刷同一题说明不了「记住多久」。</div></div>`;
+  }
+  // 窄屏用更窄的 viewBox：整个 SVG 会等比缩放到容器宽度，680 宽在 390px 手机上
+  // 文字会缩到 5px。改成 380 宽 + 隔一个刻度显示一个，字才留得住。
+  const narrow = window.innerWidth < 560;
+  const W = narrow ? 380 : 680, H = narrow ? 210 : 240, L = 42, R = 14, T = 12, B = 34;
+  const iw = W - L - R, ih = H - T - B, n = bs.length;
+  const x = i => L + (n === 1 ? iw / 2 : iw * i / (n - 1));
+  const y = v => T + ih * (1 - v / 100);
+  const path = key => bs.map((b, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(b[key]).toFixed(1)}`).join(' ');
+  const fsz = narrow ? 12 : 10.5;
+  const grid = [0, 25, 50, 75, 100].map(v =>
+    `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--rule)" stroke-width="1"${v ? ' stroke-dasharray="3 4"' : ''}/>
+     <text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="${fsz}" fill="var(--ink-3)">${v}%</text>`).join('');
+  const ticks = bs.map((b, i) => {
+    if (narrow && i % 2 === 1) return '';     // 窄屏隔一个显示，否则标签挤成一团
+    return `<text x="${x(i)}" y="${H - 12}" text-anchor="middle" font-size="${fsz}" fill="var(--ink-3)">${b.hi === null ? b.lo + '+' : b.lo + '–' + b.hi}</text>`;
+  }).join('');
+  const dots = bs.map((b, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(b.recall).toFixed(1)}" r="3.6" fill="var(--brand)">
+       <title>间隔 ${b.hi === null ? b.lo + ' 天以上' : b.lo + '–' + b.hi + ' 天'}：实测 ${b.recall}%（${b.n} 次）· 模型预测 ${b.pred}%</title>
+     </circle>`).join('');
+  return `<div class="card">
+    <div class="chart-legend">
+      <span><i class="lg-line" style="background:var(--brand)"></i>实测记住率</span>
+      <span><i class="lg-line dashed" style="background:var(--ink-3)"></i>FSRS 模型预测</span>
+      <span class="sub" style="margin:0">共 ${d.total.toLocaleString()} 次「隔天复习」样本</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="遗忘曲线">
+      ${grid}${ticks}
+      <path d="${path('pred')}" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-dasharray="5 5" stroke-linejoin="round"/>
+      <path d="${path('recall')}" fill="none" stroke="var(--brand)" stroke-width="2.2" stroke-linejoin="round"/>
+      ${dots}
+      <text x="${W / 2}" y="${H - 1}" text-anchor="middle" font-size="${fsz}" fill="var(--ink-3)">距上次复习（天）</text>
+    </svg>
+    <p class="sub" style="margin:8px 0 0">实线高于虚线 = 你比模型以为的记得更牢（可以更放心地拉长间隔）；低于虚线 = 模型高估了你，考虑把保持率调高一点。</p>
+  </div>`;
+}
+
+function goalCalendar(d, goal) {
+  const days = (d && d.days) || [];
+  if (!days.length) return '';
+  // 补到整周：从第一天所在周的周一算起，最后补到周日
+  const first = new Date(days[0].d + 'T00:00:00');
+  const pad = (first.getDay() + 6) % 7;            // 周一 = 0
+  const cells = [];
+  for (let i = 0; i < pad; i++) cells.push('<div class="cal-cell blank"></div>');
+  let hit = 0, part = 0, zero = 0;
+  days.forEach(x => {
+    const cls = x.n >= goal ? 'ok' : (x.n > 0 ? 'part' : 'none');
+    if (cls === 'ok') hit++; else if (cls === 'part') part++; else zero++;
+    cells.push(`<div class="cal-cell ${cls}" title="${x.d}：${x.n} 题${cls === 'ok' ? '（达标）' : ''}"></div>`);
+  });
+  while (cells.length % 7) cells.push('<div class="cal-cell blank"></div>');
+  return `<h2>目标达成日历（近 13 周）</h2>
+  <div class="card">
+    <div class="cal-grid">${cells.join('')}</div>
+    <div class="heat-legend">
+      <span class="cal-cell ok"></span> 达标 ${hit} 天
+      <span class="cal-cell part" style="margin-left:10px"></span> 未达标 ${part} 天
+      <span class="cal-cell none" style="margin-left:10px"></span> 没练 ${zero} 天
+      <span class="sub" style="margin-left:auto">按当前目标 ${goal} 题/天 统计（没有历史目标记录）</span>
+    </div>
+  </div>`;
+}
+
+function kadianTrend(d) {
+  const weeks = (d && d.weeks) || [], series = (d && d.series) || [];
+  if (!series.length) return '';
+  const W = 240, H = 26, iw = W - 2, ih = H - 4;
+  const idx = {}; weeks.forEach((w, i) => idx[w] = i);
+  const px = w => 1 + iw * (weeks.length === 1 ? 0.5 : idx[w] / (weeks.length - 1));
+  const py = v => 2 + ih * (1 - v / 100);
+  return `<h2>考点正确率趋势（近 12 周）</h2>
+  <div class="card">
+    ${series.map(s => {
+      // 断点要断开：某周没练就不连线，否则会画出一条并不存在的走势
+      let segs = [], cur = [];
+      s.points.forEach(p => {
+        if (cur.length && idx[p.w] - idx[cur[cur.length - 1].w] > 1) { segs.push(cur); cur = []; }
+        cur.push(p);
+      });
+      if (cur.length) segs.push(cur);
+      const lines = segs.map(seg => `<path d="${seg.map((p, i) => `${i ? 'L' : 'M'}${px(p.w).toFixed(1)},${py(p.acc).toFixed(1)}`).join(' ')}"
+        fill="none" stroke="var(--brand)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`).join('');
+      const dots = s.points.map(p => `<circle cx="${px(p.w).toFixed(1)}" cy="${py(p.acc).toFixed(1)}" r="2.2" fill="var(--brand)">
+        <title>${p.w} 那周：${p.acc}%（${p.n} 题）</title></circle>`).join('');
+      const low = s.acc < 70;
+      return `<div class="trend-row">
+        <div class="trend-name" title="${esc(s.kadian)}">${esc((s.kadian || '').split('/').pop().slice(0, 16))}</div>
+        <svg viewBox="0 0 ${W} ${H}" class="spark" role="img" aria-label="${esc(s.kadian)} 正确率趋势">
+          <line x1="1" x2="${W - 1}" y1="${py(70)}" y2="${py(70)}" stroke="var(--rule)" stroke-dasharray="2 3"/>
+          ${lines}${dots}
+        </svg>
+        <div class="trend-acc" style="color:${low ? 'var(--bad)' : 'var(--ink-2)'}">${s.acc}%</div>
+        <div class="trend-n">${s.n} 题</div>
+      </div>`;
+    }).join('')}
+    <p class="sub" style="margin:10px 0 0">按周聚合，取题量最大的 ${series.length} 个考点；虚线是 70% 参考线。点与点之间断开 = 那一周没练。</p>
+  </div>`;
+}
+
 /* ---------- stats ---------- */
 async function viewStats() {
   loading('统计中…');
-  const [st, heat, sk, acc, weak] = await Promise.all([
+  const [st, heat, sk, acc, weak, fg, cal, kt] = await Promise.all([
     API('/api/stats'), API('/api/heatmap?days=180'), API('/api/streak'), API('/api/accuracy'), API('/api/weak'),
+    API('/api/stats/forgetting').catch(() => null),
+    API('/api/stats/calendar').catch(() => null),
+    API('/api/stats/kadian-trend').catch(() => null),
   ]);
   const hm = {}; heat.days.forEach(d => hm[d.d] = d.n);
   const cells = [];
@@ -2135,6 +2271,9 @@ async function viewStats() {
   <h2>练习热力图（近半年）</h2>
   <div class="card"><div class="heat-wrap"><div class="heat-grid">${cells.join('')}</div></div>
     <div class="heat-legend">少 <span class="heat-cell"></span><span class="heat-cell l1"></span><span class="heat-cell l2"></span><span class="heat-cell l3"></span><span class="heat-cell l4"></span> 多</div></div>
+  ${goalCalendar(cal, sk.goal)}
+  <h2>遗忘曲线（实测 vs 模型）</h2>
+  ${forgetChart(fg)}
   <h2>各模块正确率</h2>
   <div class="card">
     ${acc.module.map(a => { const pc = maxAcc(a); return `<div class="acc-row">
@@ -2147,6 +2286,7 @@ async function viewStats() {
       <span class="name" title="${esc(a.k)}">${esc((a.k || '').slice(0, 14))}</span><div class="track"><i style="width:${pc}%"></i></div>
       <span class="pct">${pc}% · 对${a.c}/错${a.w}</span></div>`; }).join('') || '<div class="sub" style="margin:0">暂无数据</div>'}
   </div>
+  ${kadianTrend(kt)}
   <h2>薄弱考点（错误 / 遗忘最多）</h2>
   <div class="grid g2">
     ${weak.rows.slice(0, 12).map(r => `<div class="card kd-card" onclick="goKadianBrowse('${enc(r.kd)}')">
@@ -2215,6 +2355,26 @@ function viewSettings() {
     <p class="sub" style="margin:10px 0 0">超出的题会顺延到明天，不会丢；填 <b>0</b> 表示不限量。一天刷太多新题，第二天会被积压的复习题埋掉，20 / 200 是比较稳的节奏。</p>
     <div class="row" style="margin-top:12px"><button class="btn" id="st-lim-save">保存上限</button>
       <span class="sub" id="st-lim-cur" style="margin:0"></span></div>
+  </div>
+  <div class="card" style="max-width:640px;margin-top:16px">
+    <h2 style="margin-top:0">🧠 记忆曲线</h2>
+    <div class="row" style="justify-content:space-between;gap:12px;margin:14px 0">
+      <span>目标保持率<br><span class="sub" id="st-fs-hint" style="margin:4px 0 0">—</span></span>
+      <select id="st-fs-ret" style="flex:0 0 176px">
+        <option value="0.80">80% · 间隔最长</option>
+        <option value="0.85">85%</option>
+        <option value="0.90">90% · 默认</option>
+        <option value="0.95">95% · 最密</option>
+      </select>
+    </div>
+    <p class="sub" style="margin:0 0 12px">保持率＝「下次复习时还记得」的目标概率。调低 → 间隔拉长、每天题量变少，但忘得也多；调高 → 复习变密。它只改间隔，不影响难度判断。<br>
+      注意：普通题的间隔在 60 天封顶（顽固题 30 天），已经顶到上限的题再调保持率也看不出变化，所以它主要影响间隔还短的题。</p>
+    <div class="row" style="justify-content:space-between;gap:12px;margin:14px 0">
+      <span>参数来源<br><span class="sub" id="st-fs-w" style="margin:4px 0 0">—</span></span>
+      <button class="btn ghost" id="st-fs-reset">恢复官方默认</button>
+    </div>
+    <p class="sub" style="margin:0">官方那 19 个参数是在别人的复习数据上拟合的。攒够样本后可以按自己的流水重拟合：<br>
+      <code style="font-size:12.5px">python train_fsrs.py</code> 先看报告（会切 20% 的题做留出验证），确认有效再加 <code style="font-size:12.5px">--write</code> 写入。</p>
   </div>
   <div class="card" style="max-width:640px;margin-top:16px">
     <h2 style="margin-top:0">📤 数据导出</h2>
@@ -2289,6 +2449,50 @@ function viewSettings() {
       scheduleSide(0);
       toast('已保存每日上限');
     } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+  };
+  /* 记忆曲线：保持率只影响 next_interval() 的反解，服务端改完立刻生效，不用重启。
+     间隔倍率按 iv = s/FACTOR*(R^(1/DECAY)-1) 推，DECAY=-0.5 → R^-2，默认 0.9 归一为 1。 */
+  const fsSel = document.getElementById('st-fs-ret'), fsHint = document.getElementById('st-fs-hint');
+  const ivFactor = r => (Math.pow(r, -2) - 1) / (Math.pow(0.9, -2) - 1);
+  const syncFsrs = (d) => {
+    const r = Math.round(d.retention * 100) / 100;
+    // 按数值匹配，别按字符串：option 写的是 "0.90"，retention 是 0.9，
+    // 直接赋 value 会一个都匹配不上，下拉框变成空白。
+    const hit = [...fsSel.options].find(o => Math.abs(+o.value - r) < 1e-9);
+    if (hit) fsSel.value = hit.value;
+    else {
+      const o = document.createElement('option');
+      o.value = String(r); o.textContent = (r * 100).toFixed(0) + '%';
+      fsSel.appendChild(o); fsSel.value = o.value;
+    }
+    fsHint.textContent = `当前 ${(r * 100).toFixed(0)}% · 间隔约为默认的 ${Math.round(ivFactor(r) * 100)}%`;
+    document.getElementById('st-fs-w').textContent = d.custom_w
+      ? `已按你的数据训练（${d.trainable} 条可训练复习）`
+      : `官方默认（已有 ${d.reviews} 条评分，其中可训练 ${d.trainable} 条` +
+        (d.trainable < d.min_events ? `，还不够 ${d.min_events} 条` : '') + '）';
+    document.getElementById('st-fs-reset').style.display = d.custom_w ? '' : 'none';
+  };
+  API('/api/fsrs').then(syncFsrs).catch(() => { });
+  fsSel.onchange = async () => {
+    // 注意：这里不能用 busyBtn —— 它会把 innerHTML 换成 spinner，
+    // 用在 <select> 上等于把 option 全清掉，value 变空，保存上去就是 0。
+    const v = +fsSel.value;
+    fsSel.disabled = true;
+    try {
+      await POST('/api/fsrs', { retention: v });
+      syncFsrs(await API('/api/fsrs'));
+      toast('目标保持率已改为 ' + (v * 100).toFixed(0) + '%');
+    } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { fsSel.disabled = false; }
+  };
+  document.getElementById('st-fs-reset').onclick = async (e) => {
+    const restore = busyBtn(e.currentTarget, '恢复中…');
+    try {
+      await POST('/api/fsrs', { reset_w: true });
+      syncFsrs(await API('/api/fsrs'));
+      toast('已恢复官方默认参数');
+    } catch (err) { toast('恢复失败：' + (err && err.message ? err.message : err), 'bad'); }
     finally { restore(); }
   };
   // 功能5：导出 / 功能6：账号管理
@@ -2612,7 +2816,11 @@ async function doDeleteUser() {
   const meP = fetch('/api/auth/me', { headers: authHeaders() })
     .then(r => r.json()).catch(() => null);
   const br = await bootP;
-  if (!br.ok) return fatal('后端未就绪：' + br.e);
+  if (!br.ok) {
+    // 断网和「后端挂了」是两回事：前者用户自己能解决，别甩一句技术错误
+    if (navigator.onLine === false || (br.e && br.e.status === 0)) { offlineScreen(); return; }
+    return fatal('后端未就绪：' + br.e);
+  }
   BOOT = br.b;
 
   // 判断是否已登录：未登录则显示登录 / 注册界面

@@ -76,6 +76,32 @@ def set_params(seq):
     return True
 
 
+def clear_params():
+    """恢复官方默认参数（设置页「恢复默认」用）。"""
+    global _PARAMS
+    _PARAMS = None
+
+
+def has_custom_params():
+    return _PARAMS is not None
+
+
+def set_retention(v):
+    """目标记忆保持率。0.9 是 FSRS 的标定值；调高 → 间隔变短、复习更密。
+
+    只影响 `next_interval()` 的反解，不改模型参数，所以随时可调、立即生效。
+    """
+    global REQUEST_RETENTION
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return False
+    if not (0.70 <= f <= 0.97):
+        return False
+    REQUEST_RETENTION = f
+    return True
+
+
 def params():
     return _PARAMS or DEFAULT_W
 
@@ -168,15 +194,17 @@ def _fuzz(days, floor):
 
 
 # ---------- 主入口 ----------
-def grade_state(state, grade, fuzz=True, now=None):
+def grade_state(state, grade, fuzz=True, now=None, w=None):
     """state: dict(status, interval, repetitions, lapses, step, stability, difficulty, last_review)
     grade in {1,3,4,5}。返回新 dict（含 due / interval / stability / difficulty / step）。
 
     due 有两种格式：学习步内为 'YYYY-MM-DDTHH:MM:SS'，长间隔为 'YYYY-MM-DD'。
     两种格式在 SQL 里靠字符串比较天然兼容（'2026-11-12' <= '2026-11-12T15:30:00'），
     所以老数据不需要迁移。
+
+    `w` 仅给 train_fsrs.py 用：离线拟合时逐个候选参数重放历史，不能改全局状态。
     """
-    w = params()
+    w = w or params()
     grade = int(grade)
     rt = RATING.get(grade, 3)
     now = now or datetime.datetime.now()

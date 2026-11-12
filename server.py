@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import fsrs
+import insights
 import migrate_v2
 
 # ---------- 多用户（纯本地身份标识，最多 3 个账号） ----------
@@ -25,6 +26,7 @@ STATIC = os.path.join(HERE, "static")
 OPS_DIR = os.path.join(HERE, "ops")          # 运营面板静态页（与用户端完全分离）
 PORT = int(os.environ.get("PORT") or os.environ.get("KAOGONG_PORT") or "8300")
 mimetypes.add_type("image/webp", ".webp")
+mimetypes.add_type("application/manifest+json", ".webmanifest")   # PWA 清单
 
 _Q_TOTAL = None               # 题库总题数缓存
 _LOCK = threading.RLock()      # 进程内写串行：绝不让两条连接同时写 users.db
@@ -1368,6 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/fav": self.api_fav,
             "/api/goal": self.api_goal,
             "/api/limits": self.api_limits,
+            "/api/fsrs": self.api_fsrs,
             "/api/doubt": self.api_doubt,
             "/api/exam/submit": self.api_exam_submit,
             "/api/exam/save": self.api_exam_save,
@@ -1857,6 +1860,48 @@ class Handler(BaseHTTPRequestHandler):
                 r["acc"] = round((r["c"] or 0) / tot * 100, 1) if tot else 0
             return self._send(200, {"rows": rows})
 
+        if path == "/api/stats/forgetting":
+            # 实测遗忘曲线 vs 模型预测（只统计间隔 ≥1 天的复习）
+            uid = need_uid(g("token"))
+            return self._send(200, insights.forgetting(q_all, uid,
+                                                       days=max(30, _int(g("days"), 730))))
+
+        if path == "/api/stats/calendar":
+            # 每日目标达成日历（近 13 周）
+            uid = need_uid(g("token"))
+            return self._send(200, insights.calendar(q_all, uid,
+                                                     days=max(14, min(371, _int(g("days"), 91)))))
+
+        if path == "/api/stats/kadian-trend":
+            # 考点正确率的周序列（题量最大的前 N 个考点）
+            uid = need_uid(g("token"))
+            return self._send(200, insights.kadian_trend(
+                q_all, uid,
+                weeks=max(4, min(52, _int(g("weeks"), 12))),
+                top=max(1, min(12, _int(g("top"), 6)))))
+
+        if path == "/api/fsrs":
+            # 记忆曲线当前状态：目标保持率、参数来源、以及「够不够训练」的样本量
+            uid = need_uid(g("token"))
+            n_rev = q_one("SELECT COUNT(*) n FROM reviews WHERE user_id=?", (uid,))["n"]
+            n_card = q_one("SELECT COUNT(DISTINCT qid) n FROM reviews WHERE user_id=?",
+                           (uid,))["n"]
+            # 可训练事件：同一道题里「间隔 ≥1 天」的复习。只有这些才含「记住了吗」的信息
+            n_ev = q_one("""SELECT COUNT(*) n FROM reviews r
+                            WHERE r.user_id=? AND r.grade IS NOT NULL AND EXISTS(
+                              SELECT 1 FROM reviews p WHERE p.user_id=r.user_id
+                                AND p.qid=r.qid AND p.ts < r.ts
+                                AND julianday(r.ts)-julianday(p.ts) >= 1)""", (uid,))["n"]
+            return self._send(200, {
+                "retention": fsrs.REQUEST_RETENTION,
+                "default_retention": 0.9,
+                "custom_w": fsrs.has_custom_params(),
+                "w": list(fsrs.params()),
+                "default_w": list(fsrs.DEFAULT_W),
+                "reviews": n_rev, "cards": n_card, "trainable": n_ev,
+                "min_events": 200,
+            })
+
         if path == "/api/materials":
             # 材料组题：按材料（而不是按 material_ref）聚合。同一段材料被多份试卷复用时
             # n_paper > 1，点进去再按卷子选 —— 联考同题很常见，不区分会一次塞进几十题。
@@ -2255,6 +2300,34 @@ class Handler(BaseHTTPRequestHandler):
                     out[key] = v
             db().commit()
         return self._send(200, {"ok": True, **out})
+
+    def api_fsrs(self, p):
+        """记忆曲线设置：目标保持率 / 清掉训练出来的自定义参数。
+
+        参数与保持率都是**全局**的（跟 daily_goal 一样，settings 表按 key 存，
+        不区分账号）—— 本机单人用，没必要给每个账号存一套遗忘曲线。
+        """
+        need_uid(p.get("token"))
+        if p.get("reset_w"):
+            with _LOCK:
+                db().execute("DELETE FROM settings WHERE key='fsrs_w'")
+                db().commit()
+            fsrs.clear_params()
+            return self._send(200, {"ok": True, "custom_w": False,
+                                    "retention": fsrs.REQUEST_RETENTION})
+        if "retention" in p:
+            try:
+                v = float(p.get("retention"))
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "retention 需要是数字"})
+            if not fsrs.set_retention(v):
+                return self._send(400, {"error": "保持率请取 0.70–0.97 之间"})
+            with _LOCK:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('fsrs_retention',?)",
+                             (str(round(v, 3)),))
+                db().commit()
+            return self._send(200, {"ok": True, "retention": fsrs.REQUEST_RETENTION})
+        return self._send(400, {"error": "nothing to do"})
 
     def api_doubt(self, p):
         eqid = resolve_qid(int(p.get("id", 0)))
@@ -2658,6 +2731,13 @@ def main():
             wj = get_setting("fsrs_w")
             if wj:
                 fsrs.set_params(json.loads(wj))
+        except Exception:
+            pass
+        # 目标保持率（settings.fsrs_retention）。只影响间隔反解，改了立刻生效
+        try:
+            rv = get_setting("fsrs_retention")
+            if rv:
+                fsrs.set_retention(rv)
         except Exception:
             pass
         _warm()      # 预热题库 → OS 页缓存（新账号播种、出题查询首次都更快）
