@@ -656,7 +656,7 @@ function renderCard() {
     <button class="qtool ${S.marked.has(c.id) ? 'on' : ''}" id="t-mark" title="临时标记本题（仅本组有效，便于复盘）">⚑ ${S.marked.has(c.id) ? '已标记' : '标记'}</button>
     <a class="linkback" href="#/detail?id=${c.id}">查看完整标注</a>
     ${c.verified ? `<span class="tag vbadge" title="该题答案已经过联网权威来源核实，可信">✅ 已联网复核</span>` : ''}
-    ${(c.srs_lapses || 0) >= 8 ? `<span class="tag" style="color:var(--warn)" title="这道题已经遗忘 ${c.srs_lapses} 次。反复重刷收益很低，建议看完解析后写一条自己的笔记，或者换个记法">🔁 顽固题 · 已忘 ${c.srs_lapses} 次</span>` : ''}
+    ${c.leech ? `<span class="tag" style="color:var(--warn)" title="这道题已经遗忘 ${c.srs_lapses} 次。反复重刷收益很低，建议看完解析后写一条自己的笔记，或者换个记法">🔁 顽固题 · 已忘 ${c.srs_lapses} 次</span>` : ''}
   </div>
   ${c.module === '资料分析' && !hasMat ? `<div class="material-wrap mat-missing">⚠️ 本题材料缺失（原始数据未收录），可到「材料组题」模式换其他材料组练习</div>` : ''}
   ${hasMat ? `<details class="material-wrap" open><summary style="cursor:pointer;color:var(--brand);margin-bottom:8px">📄 给定材料 <span class="m-hint">（疑点提示将在作答后显示）</span></summary><div class="material" id="mat-stripped">${stripCallouts(c.material)}</div></details>` : ''}
@@ -1277,7 +1277,8 @@ async function viewDetail(id) {
     <span class="tag ${esc(s ? s.status : 'new')}">${{ new: '未学', learning: '学习中', review: '复习中' }[s ? s.status : 'new'] || ''}</span>
     <span class="tag">下次复习 ${s ? esc(fmtDue(s.due)) : '—'}</span>
     ${s && s.status === 'learning' ? `<span class="tag" title="学习步：1 分钟 → 10 分钟，走完才毕业成 1 天">学习步 ${Math.min(2, (s.step || 0) + 1)}/2</span>` : ''}
-    ${s && (s.lapses || 0) >= 8 ? `<span class="tag" style="color:var(--warn)" title="已遗忘 ${s.lapses} 次，建议记笔记或换记忆方式">🔁 顽固题</span>` : ''}
+    ${s && s.leech ? `<span class="tag" style="color:var(--warn)" title="已遗忘 ${s.lapses} 次，间隔已封顶 30 天，建议记笔记或换记忆方式">🔁 顽固题 · 已忘 ${s.lapses} 次</span>` : ''}
+    ${s && s.stability ? `<span class="tag" title="FSRS 记忆状态：稳定性 S=记住多久，难度 D=这题对你多难">S ${Math.round(s.stability)}d · D ${(s.difficulty || 0).toFixed(1)}</span>` : ''}
   </div>
   <h1 style="font-size:20px">${esc(c.kadian)}</h1>
   <p class="sub">${esc(c.paper || '')}</p>
@@ -1680,6 +1681,18 @@ async function viewStats() {
     <div class="card kpi purple"><div class="n">${sk.best}</div><div class="l">🏆 最长连续(天)</div></div>
     <div class="card kpi brand"><div class="n">${st.studied_today}</div><div class="l">✅ 今日已练</div></div>
     <div class="card kpi warn"><div class="n">${st.wrong}</div><div class="l">📕 错题总数</div></div>
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card kpi bad">
+      <div class="n">${st.self_biased || 0}</div>
+      <div class="l">🪞 自评偏差（选了错答案，却自评「记住了」）</div>
+      <p class="sub" style="margin:8px 0 0">这是「感觉会」和「真会」的差距。数字偏大时，别急着点「一般」，先看一遍解析再评。</p>
+    </div>
+    <div class="card kpi warn">
+      <div class="n">${st.leech || 0}</div>
+      <div class="l">🔁 顽固题（已遗忘 ≥ ${st.leech_at || 8} 次）</div>
+      <p class="sub" style="margin:8px 0 0">这些题的复习间隔已封顶 30 天，逼你反复短间隔见面。建议记一条自己的笔记，换种记法。</p>
+    </div>
   </div>
   <div class="card" style="margin-top:16px">
     <div class="ring-row">

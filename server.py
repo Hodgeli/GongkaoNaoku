@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import sm2
+import fsrs
 import migrate_v2
 
 # ---------- 多用户（纯本地身份标识，最多 3 个账号） ----------
@@ -267,9 +267,10 @@ def _read_ns(prefix, uid_col, uid):
     uid_col 为该命名空间的账号列名（本地为 user_id，云端为 uid）。"""
     return {
         "srs": q_all(f"""SELECT qid,status,ease,interval,repetitions,lapses,due,last_review,
-                                correct,wrong,wb_status,wb_streak,last_choice,step
+                                correct,wrong,wb_status,wb_streak,last_choice,step,
+                                stability,difficulty,is_correct
                          FROM {prefix}srs WHERE {uid_col}=?""", (uid,)),
-        "reviews": q_all(f"""SELECT id,qid,grade,ts,interval_before,interval_after,ease,timeout
+        "reviews": q_all(f"""SELECT id,qid,grade,ts,interval_before,interval_after,ease,timeout,is_correct
                            FROM {prefix}reviews WHERE {uid_col}=?""", (uid,)),
         "notes": q_all(f"SELECT qid,text,updated FROM {prefix}notes WHERE {uid_col}=?", (uid,)),
         "favorites": q_all(f"SELECT qid,added FROM {prefix}favorites WHERE {uid_col}=?", (uid,)),
@@ -289,19 +290,21 @@ def _write_ns(prefix, uid_col, uid, data):
         for r in (data.get("srs") or []):
             db().execute(f"""INSERT OR REPLACE INTO {prefix}srs
                 (qid,{uid_col},status,ease,interval,repetitions,lapses,due,last_review,
-                 correct,wrong,wb_status,wb_streak,last_choice,step)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 correct,wrong,wb_status,wb_streak,last_choice,step,stability,difficulty,is_correct)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (r["qid"], uid, r.get("status", "new"), r.get("ease", 2.5), r.get("interval", 0),
                  r.get("repetitions", 0), r.get("lapses", 0), r.get("due"), r.get("last_review"),
                  r.get("correct", 0), r.get("wrong", 0), r.get("wb_status", "active"),
-                 r.get("wb_streak", 0), r.get("last_choice"), r.get("step", 0)))
+                 r.get("wb_streak", 0), r.get("last_choice"), r.get("step", 0),
+                 r.get("stability"), r.get("difficulty"), r.get("is_correct")))
         db().execute(f"DELETE FROM {prefix}reviews WHERE {uid_col}=?", (uid,))
         for r in (data.get("reviews") or []):
             db().execute(f"""INSERT OR REPLACE INTO {prefix}reviews
-                (id,qid,{uid_col},grade,ts,interval_before,interval_after,ease,timeout)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (id,qid,{uid_col},grade,ts,interval_before,interval_after,ease,timeout,is_correct)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (r.get("id"), r.get("qid"), uid, r.get("grade"), r.get("ts"),
-                 r.get("interval_before"), r.get("interval_after"), r.get("ease"), r.get("timeout", 0)))
+                 r.get("interval_before"), r.get("interval_after"), r.get("ease"),
+                 r.get("timeout", 0), r.get("is_correct")))
         db().execute(f"DELETE FROM {prefix}notes WHERE {uid_col}=?", (uid,))
         for r in (data.get("notes") or []):
             db().execute(f"INSERT OR REPLACE INTO {prefix}notes(qid,{uid_col},text,updated) VALUES(?,?,?,?)",
@@ -446,6 +449,24 @@ def ensure_tables():
         db().commit()
     except Exception:
         pass
+    # FSRS-5 记忆状态：稳定性 S（记住多久）与难度 D（这题对你多难）。
+    # 老卡没有这两列，首次评分时按「间隔即稳定性」反推（见 fsrs.grade_state），
+    # 所以不需要一次性批量迁移。
+    for ddl in ("ALTER TABLE srs ADD COLUMN stability REAL",
+                "ALTER TABLE srs ADD COLUMN difficulty REAL",
+                "ALTER TABLE srs ADD COLUMN is_correct INTEGER"):
+        try:
+            db().execute(ddl)
+            db().commit()
+        except Exception:
+            pass
+    # is_correct：选项是否等于答案（客观口径）。与 correct/wrong（自评口径）并存，
+    # 只用于统计「自评说记住了、其实选错了」的偏差，不参与错题本判定。
+    try:
+        db().execute("ALTER TABLE reviews ADD COLUMN is_correct INTEGER")
+        db().commit()
+    except Exception:
+        pass
     # 每日额度统计要按「今天」扫 reviews；date(ts) 用不上索引，改用 ts LIKE 前缀匹配
     try:
         db().execute("CREATE INDEX IF NOT EXISTS idx_reviews_user_ts ON reviews(user_id, ts)")
@@ -465,7 +486,8 @@ def ensure_tables():
         lapses INTEGER DEFAULT 0, due TEXT, last_review TEXT,
         correct INTEGER DEFAULT 0, wrong INTEGER DEFAULT 0,
         wb_status TEXT DEFAULT 'active', wb_streak INTEGER DEFAULT 0,
-        last_choice TEXT, step INTEGER DEFAULT 0, PRIMARY KEY(qid, uid));
+        last_choice TEXT, step INTEGER DEFAULT 0,
+        stability REAL, difficulty REAL, is_correct INTEGER, PRIMARY KEY(qid, uid));
     CREATE TABLE IF NOT EXISTS cloud_reviews(
         id INTEGER PRIMARY KEY AUTOINCREMENT, qid TEXT, uid TEXT NOT NULL,
         grade INT, ts TEXT, interval_before INT, interval_after INT, ease REAL,
@@ -485,11 +507,16 @@ def ensure_tables():
     CREATE INDEX IF NOT EXISTS idx_cloud_rev ON cloud_reviews(uid);
     """)
     # 老库补列：cloud_srs 必须在上面的建表语句之后补，否则首次启动时表还不存在
-    try:
-        db().execute("ALTER TABLE cloud_srs ADD COLUMN step INTEGER DEFAULT 0")
-        db().commit()
-    except Exception:
-        pass
+    for ddl in ("ALTER TABLE cloud_srs ADD COLUMN step INTEGER DEFAULT 0",
+                "ALTER TABLE cloud_srs ADD COLUMN stability REAL",
+                "ALTER TABLE cloud_srs ADD COLUMN difficulty REAL",
+                "ALTER TABLE cloud_srs ADD COLUMN is_correct INTEGER",
+                "ALTER TABLE cloud_reviews ADD COLUMN is_correct INTEGER"):
+        try:
+            db().execute(ddl)
+            db().commit()
+        except Exception:
+            pass
 
 def get_setting(key, default=None):
     r = q_one("SELECT value FROM settings WHERE key=?", (key,))
@@ -577,6 +604,7 @@ def clean_card(row, reveal=False, uid=DEFAULT_UID):
         "material_ref": row.get("material_ref", ""),
         # 遗忘次数：前端据此提示「顽固题」，连续遗忘的题该去看解析而不是继续刷
         "srs_lapses": (row["srs_lapses"] if "srs_lapses" in row.keys() else 0) or 0,
+        "leech": fsrs.is_leech(row["srs_lapses"] if "srs_lapses" in row.keys() else 0),
     }
     if not reveal:
         for o in d["options"]:
@@ -625,6 +653,43 @@ def build_where(module, category, kadian):
     if kadian:
         cond.append("q.kadian LIKE ?"); args.append("%" + kadian + "%")
     return (" AND " + " AND ".join(cond)) if cond else "", args
+
+
+# 资料分析「材料组」：同一份材料下的小题一次给全，否则每做一道都要重读一遍材料。
+# 口径必须是 (region, year, material_ref) 三元组 —— 只用 material_ref 会把
+# 「湖北 2019 案例分析」这种 60 道题共用一段材料的组也当成材料组，一次塞 60 道。
+GROUP_MAX = 6        # 组内 ≤6 题才整组；更大的组保持单题抽
+GROUP_LIMIT = 3      # 一次最多整组带出 3 个组，避免队列膨胀
+GROUP_BUDGET = 10    # 整组补充后允许比 size 多出的题数
+
+
+def group_materials(rows, uid, size):
+    """把抽到的资料分析题替换成「整组」。已抽到的同组题会去重，不会重复。"""
+    if not rows:
+        return rows
+    seen, out, used = set(), [], 0
+    budget = size + GROUP_BUDGET
+    for r in rows:
+        if r["qid"] in seen:
+            continue
+        ref = (r.get("material_ref") or "").strip()
+        if r.get("module") == "资料分析" and ref and used < GROUP_LIMIT:
+            key = (r.get("region") or "", r.get("year") or "", ref)
+            grp = q_all("""SELECT q.*, IFNULL(s.status,'new') AS srs_status,
+                                  IFNULL(s.lapses,0) AS srs_lapses
+                           FROM qdb.questions q
+                           LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?
+                           WHERE q.region=? AND q.year=? AND q.material_ref=?
+                           ORDER BY q.id LIMIT ?""", (uid, *key, GROUP_MAX + 1))
+            # 只整组 2~6 题的组；1 题没什么可带，>6 题（案例分析那类）保持单题
+            if 2 <= len(grp) <= GROUP_MAX and len(out) + len(grp) <= budget:
+                for g in grp:
+                    if g["qid"] not in seen:
+                        seen.add(g["qid"]); out.append(g)
+                used += 1
+                continue
+        seen.add(r["qid"]); out.append(r)
+    return out
 
 
 # ============ 只读运营面板（/ops）============
@@ -807,7 +872,8 @@ def _srs_snapshot(row):
     """评分前的 srs 快照，供「撤销上一次评分」原样恢复。
     只取会被 _apply_grade 改动的列；不存 qid/user_id（由 WHERE 指定）。"""
     keys = ("status", "ease", "interval", "repetitions", "lapses", "due",
-            "last_review", "correct", "wrong", "wb_status", "wb_streak", "last_choice", "step")
+            "last_review", "correct", "wrong", "wb_status", "wb_streak", "last_choice",
+            "step", "stability", "difficulty", "is_correct")
     return {k: (row[k] if k in row.keys() else None) for k in keys}
 
 
@@ -1119,6 +1185,12 @@ class Handler(BaseHTTPRequestHandler):
             studied_today = q_one("SELECT COUNT(DISTINCT qid) n FROM reviews WHERE user_id=? AND date(ts)=?", (uid, t))["n"]
             wrong_n = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND wrong>0", (uid,))["n"]
             fav_n = q_one("SELECT COUNT(*) n FROM favorites WHERE user_id=?", (uid,))["n"]
+            # 自评偏差：最近一次选项选错了，但历史上自评过「对」——
+            # 说明「我以为记住了」和「真做对了」不一致，比单纯的错题数更能反映虚假掌握
+            biased = q_one("""SELECT COUNT(*) n FROM srs
+                              WHERE user_id=? AND is_correct=0 AND correct>0""", (uid,))["n"]
+            leech_n = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND lapses>=?",
+                            (uid, fsrs.LEECH_AT))["n"]
             by_mod = q_all("""SELECT q.module m, COUNT(*) total,
                               SUM(CASE WHEN s.qid IS NOT NULL AND s.status!='new' THEN 1 ELSE 0 END) learned
                               FROM qdb.questions q LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?
@@ -1128,13 +1200,14 @@ class Handler(BaseHTTPRequestHandler):
             mastery = q_all("SELECT interval FROM srs WHERE user_id=? AND status!='new'", (uid,))
             buckets = {"学习中": 0, "初记": 0, "短期": 0, "长期": 0, "稳固": 0}
             for r in mastery:
-                buckets[sm2.mastery_bucket(r["interval"])] += 1
+                buckets[fsrs.mastery_bucket(r["interval"])] += 1
             used = daily_used(uid)
             return self._send(200, {
                 "new": due_new, "due_review": due_rev, "due_soon": due_soon, "learned": learned,
                 "studied_today": studied_today, "by_module": by_mod,
                 "due_by_module": due_by_mod, "mastery": buckets,
                 "wrong": wrong_n, "fav": fav_n,
+                "self_biased": biased, "leech": leech_n, "leech_at": fsrs.LEECH_AT,
                 "today_new": used["new"], "today_review": used["review"],
                 "limit_new": _int(get_setting("daily_new", "0"), 0),
                 "limit_review": _int(get_setting("daily_review", "0"), 0),
@@ -1200,8 +1273,11 @@ class Handler(BaseHTTPRequestHandler):
                                 WHERE s.wrong>0 AND IFNULL(s.wb_status,'active')='active'{cond}
                                 ORDER BY RANDOM() LIMIT ?""", (uid, *args, size))
             elif mode == "wrong":
+                # 错题优先按「错得多」排；同错次数下难度高的（FSRS difficulty）排前面。
+                # ease 是 SM-2 时代的字段，已不再更新，只作历史参考。
                 rows = q_all(f"""SELECT {SEL} {J}
-                                WHERE s.wrong>0{cond} ORDER BY s.wrong DESC, s.ease ASC LIMIT ?""",
+                                WHERE s.wrong>0{cond}
+                                ORDER BY s.wrong DESC, IFNULL(s.difficulty,5) DESC LIMIT ?""",
                              (uid, *args, size))
             elif mode == "review":
                 # 到期复习：只按 SM-2 到期判断，绝不再套 exclude ——
@@ -1234,6 +1310,9 @@ class Handler(BaseHTTPRequestHandler):
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE {NEW}{cond}{excl_clause} ORDER BY RANDOM() LIMIT ?""", (uid, *ea, size))
             if rows:
+                # 资料分析整组带出（只在新题/智能复习里做，复习到期保持严格的到期口径）
+                if mode in ("new", "study", "mix"):
+                    rows = group_materials(rows, uid, size)
                 ensure_srs_rows(uid, [r["qid"] for r in rows])   # 抽到的题补齐进度行（一次事务）
             cards = []
             for r in rows:
@@ -1262,6 +1341,8 @@ class Handler(BaseHTTPRequestHandler):
             if not srs:   # 按需生成：直接看某题也补一条空白进度，详情页/收藏才能正常标状态
                 ensure_srs_rows(uid, [r["qid"]])
                 srs = q_one("SELECT * FROM srs WHERE qid=? AND user_id=?", (r["qid"], uid))
+            if srs:
+                srs["leech"] = fsrs.is_leech(srs.get("lapses"))
             return self._send(200, {"card": clean_card(r, reveal=True, uid=uid), "srs": srs})
 
         if path == "/api/browse":
@@ -1535,7 +1616,7 @@ class Handler(BaseHTTPRequestHandler):
         if not st:
             return None
         before = st["interval"]
-        new = sm2.grade_state(st, grade)
+        new = fsrs.grade_state(st, grade)
         correct = 1 if grade >= 3 else 0
         wrong_now = (st["wrong"] or 0) + (0 if correct else 1)
         streak = st["wb_streak"] or 0
@@ -1548,17 +1629,27 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 streak = 0
                 wb = "active"                  # 又答错/遗忘 → 回到待重练
+        # 客观对错：选项是否等于答案。多选答案（如 'ABD'）与空答案不参与 ——
+        # 前端只让选一个键，拿它比多选答案永远是错，会把「自评偏差」统计灌成噪声。
+        ic = None
+        if choice:
+            ans = (q_one("SELECT answer FROM qdb.questions WHERE qid=?", (eqid,)) or {}).get("answer") or ""
+            ans = str(ans).strip().upper()
+            if len(ans) == 1:
+                ic = 1 if str(choice).strip().upper()[:1] == ans else 0
         db().execute("""UPDATE srs SET status=?,ease=?,interval=?,repetitions=?,lapses=?,due=?,
                         last_review=?, correct=correct+?, wrong=wrong+?, wb_status=?, wb_streak=?,
-                        last_choice=COALESCE(?,last_choice), step=?
+                        last_choice=COALESCE(?,last_choice), step=?, stability=?, difficulty=?,
+                        is_correct=COALESCE(?,is_correct)
                         WHERE qid=? AND user_id=?""",
                      (new["status"], new["ease"], new["interval"], new["repetitions"], new["lapses"],
                       new["due"], now(), correct, 0 if correct else 1, wb, streak, choice,
-                      new.get("step") or 0, eqid, uid))
-        db().execute("""INSERT INTO reviews(qid,user_id,grade,ts,interval_before,interval_after,ease,timeout,prev_json)
-                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                      new.get("step") or 0, new.get("stability"), new.get("difficulty"),
+                      ic, eqid, uid))
+        db().execute("""INSERT INTO reviews(qid,user_id,grade,ts,interval_before,interval_after,ease,timeout,prev_json,is_correct)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
                      (eqid, uid, grade, now(), before, new["interval"], new["ease"],
-                      1 if timeout else 0, json.dumps(_srs_snapshot(st), ensure_ascii=False)))
+                      1 if timeout else 0, json.dumps(_srs_snapshot(st), ensure_ascii=False), ic))
         return new
 
     def api_grade(self, p):
@@ -1615,7 +1706,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "评分快照已损坏，无法撤销"})
             db().execute("""UPDATE srs SET status=?,ease=?,interval=?,repetitions=?,lapses=?,due=?,
                             last_review=?,correct=?,wrong=?,wb_status=?,wb_streak=?,last_choice=?,
-                            step=?
+                            step=?,stability=?,difficulty=?,is_correct=?
                             WHERE qid=? AND user_id=?""",
                          (prev.get("status") or "new", prev.get("ease") or 2.5,
                           prev.get("interval") or 0, prev.get("repetitions") or 0,
@@ -1623,6 +1714,7 @@ class Handler(BaseHTTPRequestHandler):
                           prev.get("correct") or 0, prev.get("wrong") or 0,
                           prev.get("wb_status") or "active", prev.get("wb_streak") or 0,
                           prev.get("last_choice"), prev.get("step") or 0,
+                          prev.get("stability"), prev.get("difficulty"), prev.get("is_correct"),
                           row["qid"], uid))
             db().execute("DELETE FROM reviews WHERE id=?", (row["id"],))
             db().commit()
@@ -1934,6 +2026,13 @@ def main():
     try:
         ensure_tables()
         q_one("SELECT COUNT(*) n FROM qdb.questions")   # 兜底：ATTACH 缺文件会静默建空库
+        # 自定义 FSRS 参数（settings.fsrs_w 存 19 个浮点的 JSON 数组），没配就用官方默认
+        try:
+            wj = get_setting("fsrs_w")
+            if wj:
+                fsrs.set_params(json.loads(wj))
+        except Exception:
+            pass
         _warm()      # 预热题库 → OS 页缓存（新账号播种、出题查询首次都更快）
     except Exception as e:
         print(f"[ERR] 题库 kaogong.db 不可读: {e}")
