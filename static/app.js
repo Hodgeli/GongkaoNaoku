@@ -93,7 +93,7 @@ const esc = (s) => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;
 const app = document.getElementById('app');
 let BOOT = null;
 
-const state = { session: null, exam: null };
+const state = { session: null, exam: null, papers: null };
 
 /* ---------- 功能2：限时模式配置 ---------- */
 const LIMIT_DEFAULT = {
@@ -1487,24 +1487,119 @@ async function markDoubt(id, status, btn) {
 }
 
 /* ---------- exam ---------- */
+/* 计分口径：官方从不公布行测分值，这里给两套常用口径。
+   weight 按模块加权（更接近真实估分），even 就是纯正确率。 */
+const SCORE_MODES = {
+  weight: '按模块加权（常识/政治 0.5、言语/判断 0.8、数量/资料 1.0，归一到 100 分）',
+  even: '每题等分（纯正确率，不区分模块）',
+};
+
 function viewExam() {
-  const cats = BOOT.categories;
   app.innerHTML = `
-  <h1>模拟考试</h1><p class="sub">限定题量与时长，整卷作答，交卷即时判分并按记忆曲线记录</p>
-  <div class="card" style="max-width:640px">
+  <h1>模拟考试</h1><p class="sub">整卷作答 · 交卷即时判分 · 可断点续考。题面按真实卷面的模块顺序排列，不打乱。</p>
+  <div id="ex-resume"></div>
+  <div class="seg" id="e-tabs"><button class="on" data-tab="paper">真题整卷</button><button data-tab="quick">快速组卷</button></div>
+  <div id="e-pane"></div>
+  <h2>历史记录</h2>
+  <div class="card" style="padding:0;overflow:auto" id="e-hist"><div class="loading" style="padding:26px"><div class="spinner"></div><div class="loading-txt">加载历史…</div></div></div>
+  <div id="e-hist-detail"></div>`;
+  const tabs = document.getElementById('e-tabs');
+  tabs.querySelectorAll('button').forEach(b => b.onclick = () => {
+    tabs.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    renderExamPane(b.dataset.tab);
+  });
+  renderExamPane('paper');
+  loadExamResume();
+  loadExamHistory();
+}
+
+/* ---------- 组卷入口：真题整卷 / 快速组卷 ---------- */
+async function renderExamPane(kind) {
+  const pane = document.getElementById('e-pane'); if (!pane) return;
+  if (kind === 'quick') { pane.innerHTML = quickPaneHTML(); bindQuickPane(); return; }
+  if (!state.papers) {
+    pane.innerHTML = `<div class="card"><div class="loading"><div class="spinner"></div>
+      <div class="loading-txt">读取真题卷清单…</div></div></div>`;
+    try { state.papers = (await API('/api/exam/papers')).rows || []; }
+    catch (e) {
+      pane.innerHTML = `<div class="card"><div class="sub" style="margin:0">真题卷清单读取失败：${esc(e.message || e)}</div></div>`;
+      return;
+    }
+  }
+  if (!state.papers.length) {
+    pane.innerHTML = `<div class="card"><div class="sub" style="margin:0">题库里没有可整卷组卷的真题（需要同一份试卷至少 20 题）。用「快速组卷」即可。</div></div>`;
+    return;
+  }
+  pane.innerHTML = paperPaneHTML();
+  bindPaperPane();
+}
+
+function paperPaneHTML() {
+  const regions = [...new Set(state.papers.map(p => p.region).filter(Boolean))];
+  return `<div class="card" style="max-width:760px">
+    <p class="sub" style="margin:0 0 14px">按原卷一次性组卷：题量、模块构成、卷面顺序都与当年真题一致。</p>
+    <div class="filters" style="margin-bottom:12px">
+      <label class="fld">地区<select id="p-region">${regions.map(r => `<option>${esc(r)}</option>`).join('')}</select></label>
+      <label class="fld">年份<select id="p-year"></select></label>
+      <label class="fld">时长(分钟)<input id="p-t" type="number" value="120" min="10" max="180" style="width:96px"></label>
+    </div>
+    <label class="fld" style="margin-bottom:var(--s5)">试卷<select id="p-paper" style="width:100%"></select></label>
+    <div class="row" style="justify-content:space-between">
+      <span class="sub" id="p-info" style="margin:0"></span>
+      <button class="btn big warn" id="p-go">▶ 开始整卷模考</button>
+    </div>
+  </div>`;
+}
+
+function bindPaperPane() {
+  const R = document.getElementById('p-region'), Y = document.getElementById('p-year'), P = document.getElementById('p-paper');
+  if (!R) return;
+  const ps = state.papers || [];
+  const listOf = () => ps.filter(p => p.region === R.value && p.year === Y.value);
+  const cur = () => listOf()[+P.value || 0];
+  const updateInfo = () => {
+    const p = cur(), box = document.getElementById('p-info');
+    if (box) box.textContent = p ? `${p.region} ${p.year} · 共 ${p.n} 题` : '';
+  };
+  const fillPapers = () => {
+    P.innerHTML = listOf().map((p, i) => `<option value="${i}">${esc(p.paper)}（${p.n} 题）</option>`).join('');
+    updateInfo();
+  };
+  const fillYears = () => {
+    const ys = [...new Set(ps.filter(p => p.region === R.value).map(p => p.year))].sort().reverse();
+    Y.innerHTML = ys.map(y => `<option>${esc(y)}</option>`).join('');
+    fillPapers();
+  };
+  R.onchange = fillYears; Y.onchange = fillPapers; P.onchange = updateInfo;
+  fillYears();
+  document.getElementById('p-go').onclick = () => {
+    const p = cur(); if (!p) return toast('没有可用的真题卷', 'bad');
+    const mins = Math.max(10, Math.min(180, +document.getElementById('p-t').value || 120));
+    startExam({ n: p.n, minutes: mins, region: p.region, year: p.year, paper: p.paper,
+      title: `${p.region} ${p.year} 真题整卷`, scoreMode: 'weight' });
+  };
+}
+
+function quickPaneHTML() {
+  return `<div class="card" style="max-width:760px">
     <div class="filters">
       <label class="fld">模块<select id="e-mod"><option value="">全部混合</option>
         ${BOOT.modules.map(m => `<option value="${esc(m.module)}">${esc(m.module)}</option>`).join('')}</select></label>
       <label class="fld">大类<select id="e-cat"><option value="">全部大类</option>
-        ${cats.map(c => `<option value="${esc(c.category)}">${esc(c.category)}</option>`).join('')}</select></label>
-      <label class="fld">题量<input id="e-n" type="number" value="10" min="5" max="60" style="width:90px"></label>
-      <label class="fld">时长(分钟)<input id="e-t" type="number" value="15" min="1" max="180" style="width:90px"></label>
+        ${BOOT.categories.map(c => `<option value="${esc(c.category)}">${esc(c.category)}</option>`).join('')}</select></label>
+      <label class="fld">题量<input id="e-n" type="number" value="20" min="5" max="200" style="width:96px"></label>
+      <label class="fld">时长(分钟)<input id="e-t" type="number" value="20" min="1" max="180" style="width:96px"></label>
+      <label class="fld" style="flex:1;min-width:280px">计分<select id="e-score" style="width:100%">
+        ${Object.keys(SCORE_MODES).map(k => `<option value="${k}">${esc(SCORE_MODES[k])}</option>`).join('')}</select></label>
     </div>
-    <div class="row"><button class="btn big warn" id="e-go">▶ 开始模考</button></div>
-  </div>
-  <h2>历史记录</h2>
-  <div class="card" style="padding:0;overflow:auto" id="e-hist"><div class="loading" style="padding:26px"><div class="spinner"></div><div class="loading-txt">加载历史…</div></div></div>`;
+    <div class="row"><button class="btn big warn" id="e-go">▶ 开始模考</button>
+      <span class="sub" style="margin:0">抽到的题会按真实卷面模块顺序重排</span></div>
+  </div>`;
+}
+
+function bindQuickPane() {
   const emod = document.getElementById('e-mod');
+  if (!emod) return;
   emod.onchange = () => {
     const c = document.getElementById('e-cat'); const mv = emod.value;
     c.innerHTML = '<option value="">全部大类</option>' + BOOT.categories.filter(x => !mv || x.module === mv)
@@ -1512,52 +1607,105 @@ function viewExam() {
   };
   document.getElementById('e-go').onclick = () => startExam({
     module: emod.value, category: document.getElementById('e-cat').value,
-    n: Math.max(5, Math.min(60, +document.getElementById('e-n').value || 10)),
-    minutes: Math.max(1, +document.getElementById('e-t').value || 15),
+    n: Math.max(5, Math.min(200, +document.getElementById('e-n').value || 20)),
+    minutes: Math.max(1, Math.min(180, +document.getElementById('e-t').value || 20)),
+    scoreMode: document.getElementById('e-score').value,
+    title: (emod.value || '全模块') + ' 模考',
   });
-  loadExamHistory();
-}
-async function loadExamHistory() {
-  const box = document.getElementById('e-hist'); if (!box) return;
-  const d = await API('/api/exam/history');
-  if (!d.rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">还没有模考记录</div>'; return; }
-  box.innerHTML = `<table><thead><tr><th>时间</th><th>名称</th><th>题量</th><th>正确</th><th>得分</th><th>用时</th></tr></thead><tbody>
-    ${d.rows.map(r => `<tr><td>${esc((r.ts || '').replace('T', ' ').slice(0, 16))}</td><td>${esc(r.title)}</td>
-      <td>${r.total}</td><td style="color:var(--ok)">${r.correct}</td>
-      <td><b style="color:${r.score >= 60 ? 'var(--ok)' : 'var(--warn)'}">${r.score}</b></td>
-      <td>${Math.floor((r.duration || 0) / 60)}分${(r.duration || 0) % 60}秒</td></tr>`).join('')}</tbody></table>`;
 }
 
+/* ---------- 断点续考 ---------- */
+async function loadExamResume() {
+  const box = document.getElementById('ex-resume'); if (!box) return;
+  let d; try { d = await API('/api/exam/resume'); } catch (e) { return; }
+  const pg = d.progress;
+  if (!pg || !pg.items || !pg.items.length) { box.innerHTML = ''; return; }
+  const remain = Math.max(0, Math.floor((pg.deadline - Date.now()) / 1000));
+  const done = pg.items.filter(x => x.chosen).length;
+  box.innerHTML = `<div class="card resume-card">
+    <div style="flex:1;min-width:240px">
+      <b>有一张没做完的卷：${esc(pg.title || '模拟考试')}</b>
+      <div class="sub" style="margin:4px 0 0">已答 ${done} / ${pg.items.length} 题 · ${remain > 0 ? '剩余 ' + fmt(remain) : '已超时（继续后立即交卷）'} · 存档于 ${esc((pg.updated || '').replace('T', ' ').slice(5, 16))}</div>
+    </div>
+    <div class="row"><button class="btn resume" id="ex-resume-go">继续上次模考</button>
+      <button class="btn ghost" id="ex-resume-del">放弃</button></div></div>`;
+  document.getElementById('ex-resume-go').onclick = () => resumeExam(pg);
+  document.getElementById('ex-resume-del').onclick = async () => {
+    if (!confirm('放弃这张卷？已作答的内容不会保存。')) return;
+    try { await POST('/api/exam/discard', {}); } catch (e) { /* 已删过也无所谓 */ }
+    box.innerHTML = ''; toast('已放弃上次模考');
+  };
+}
+
+async function resumeExam(pg) {
+  loading('正在恢复上次模考…');
+  await buildExam(pg.items.map(x => ({ id: x.id })), {
+    minutes: pg.minutes, title: pg.title, scoreMode: pg.scoreMode, paper: pg.paper,
+    deadline: pg.deadline, cur: pg.cur, chosen: pg.items.map(x => x.chosen || null),
+  });
+}
+
+let _examSaveTimer = null;
+function examSave() {
+  const E = state.exam;
+  if (!E || E.submitted || _examSaveTimer) return;   // 单飞：同一时间只挂一个待发请求
+  _examSaveTimer = setTimeout(async () => {
+    _examSaveTimer = null;
+    const S = state.exam; if (!S || S.submitted) return;
+    S.savedAt = Date.now();
+    try {
+      await POST('/api/exam/save', { payload: {
+        items: S.items.map(x => ({ id: x.card.id, chosen: x.chosen })),
+        cur: S.cur, deadline: S.deadline, minutes: S.minutes,
+        title: S.title, scoreMode: S.scoreMode, paper: S.paper,
+      } });
+    } catch (e) { /* 存档失败不打断作答，下一轮 tick 会再试 */ }
+  }, 400);
+}
+
+/* ---------- 组卷与作答 ---------- */
 async function startExam(cfg) {
   loading('组卷中…');
-  /* mode=exam：从整个题库随机组卷（含已学题）。用 new 会只抽没学过的，学到后期就组不出卷了 */
+  /* mode=exam：从整个题库随机抽（含已学题）。用 new 会只抽没学过的，学到后期就组不出卷了 */
   const p = new URLSearchParams(); p.set('mode', 'exam'); p.set('size', cfg.n);
-  if (cfg.module) p.set('module', cfg.module);
-  if (cfg.category) p.set('category', cfg.category);
+  ['module', 'category', 'region', 'year', 'paper'].forEach(k => { if (cfg[k]) p.set(k, cfg[k]); });
   let res; try { res = await API('/api/next?' + p); } catch (e) { return fatal(e); }
-  if (!res.cards.length) { app.innerHTML = `<div class="empty"><div class="big">📭</div><h2>该范围没有可组的新题</h2>
-    <div class="row"><a class="btn" href="#/exam">返回</a></div></div>`; return; }
-  /* 逐题取完整卡片：模考要一次性拉整套解析，Pi 上可能要几秒，必须报进度 */
-  const totalQ = res.cards.length;
+  if (!res.cards.length) {
+    app.innerHTML = `<div class="empty"><div class="big">📭</div><h2>该范围没有可组的题</h2>
+      <div class="row"><a class="btn" href="#/exam">返回</a></div></div>`; return;
+  }
+  await buildExam(res.cards, cfg);
+}
+
+/* 把「题号列表 + 配置」变成一张可作答的卷：逐题取完整卡片（含解析与材料）。 */
+async function buildExam(cards, cfg) {
+  const totalQ = cards.length;
   let doneQ = 0;
   loading(`组卷中… 正在调取题目 0/${totalQ}`);
   let reveal;
   try {
-    reveal = await Promise.all(res.cards.map(c => API('/api/question?id=' + c.id).then(d => {
+    reveal = await Promise.all(cards.map(c => API('/api/question?id=' + c.id).then(d => {
       doneQ++;
       loading(`组卷中… 正在调取题目 ${doneQ}/${totalQ}`);
       return d.card;
     })));
   } catch (e) { return fatal(e); }
   state.exam = {
-    items: reveal.map(c => ({ card: c, chosen: null })),
-    cur: 0, total: reveal.length,
-    deadline: Date.now() + cfg.minutes * 60 * 1000,
-    minutes: cfg.minutes, submitted: false, title: (cfg.module || '全模块') + ' 模考',
+    items: reveal.map((c, i) => ({ card: c, chosen: (cfg.chosen && cfg.chosen[i]) || null })),
+    cur: Math.max(0, Math.min(reveal.length - 1, cfg.cur || 0)),
+    total: reveal.length,
+    deadline: cfg.deadline || (Date.now() + (cfg.minutes || 20) * 60 * 1000),
+    minutes: cfg.minutes || 20,
+    submitted: false,
+    title: cfg.title || '模拟考试',
+    scoreMode: cfg.scoreMode || 'weight',
+    paper: cfg.paper || '',
+    savedAt: 0, timer: null,
   };
   renderExam();
   clearInterval(state.exam.timer);
   state.exam.timer = setInterval(examTick, 1000);
+  examSave();   // 组完卷立刻落一次存档：开考就关掉浏览器也能接着做
 }
 
 function examTick() {
@@ -1568,17 +1716,40 @@ function examTick() {
     const s = Math.max(0, Math.floor(remain / 1000));
     el.textContent = fmt(s); el.classList.toggle('low', s <= 60);
   }
-  if (remain <= 0) { clearInterval(E.timer); examSubmit(true); }
+  if (remain <= 0) { clearInterval(E.timer); examSubmit(true); return; }
+  /* 每 15 秒静默存档一次：只靠「选完就存」不够 —— 有人会在一道题上停很久，
+     或者干脆没选就关掉页面。 */
+  if (Date.now() - (E.savedAt || 0) > 15000) examSave();
 }
 function fmt(s) { const m = Math.floor(s / 60), r = s % 60; return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r; }
+
+/* 答题卡按模块分组：整卷真题有 135 题，一长串数字看不出「我现在在哪个模块」。 */
+function examGroups(E) {
+  const out = [];
+  E.items.forEach((x, i) => {
+    const m = x.card.module || '其他';
+    let g = out[out.length - 1];
+    if (!g || g.m !== m) { g = { m, list: [] }; out.push(g); }
+    g.list.push({ x, i });
+  });
+  return out;
+}
 
 function renderExam() {
   const E = state.exam; if (!E) return;
   const it = E.items[E.cur], c = it.card;
+  const done = E.items.filter(x => x.chosen).length;
   app.innerHTML = `
-  <div class="exam-timer"><div><b style="font-size:15px">模拟考试 · ${esc(E.title)}</b><div class="sub" style="margin:2px 0 0">第 ${E.cur + 1} / ${E.total} 题</div></div>
+  <div class="exam-timer"><div><b style="font-size:15px">模拟考试 · ${esc(E.title)}</b>
+    <div class="sub" style="margin:2px 0 0">第 ${E.cur + 1} / ${E.total} 题 · ${esc(c.module || '')} · 已答 ${done}</div></div>
     <div style="text-align:right"><div class="t" id="ex-time">--:--</div><div class="sub" style="margin:0">剩余时间</div></div></div>
-  <div class="exam-nav">${E.items.map((x, i) => `<button class="exam-dot ${x.chosen ? 'answered' : ''} ${i === E.cur ? 'cur' : ''}" onclick="examGoto(${i})">${i + 1}</button>`).join('')}</div>
+  <details class="exam-card" ${window.innerWidth < 720 ? '' : 'open'}>
+    <summary>答题卡 · 已答 ${done} / ${E.total}</summary>
+    <div class="exam-nav">${examGroups(E).map(g => `<div class="exam-grp">
+    <div class="exam-grp-h">${esc(g.m)}<span>${g.list.length} 题</span></div>
+    <div class="exam-grp-b">${g.list.map(({ x, i }) => `<button class="exam-dot ${x.chosen ? 'answered' : ''} ${i === E.cur ? 'cur' : ''}" onclick="examGoto(${i})">${i + 1}</button>`).join('')}</div>
+  </div>`).join('')}</div>
+  </details>
   ${c.material ? `<details open class="material-wrap"><summary style="cursor:pointer;color:var(--brand);margin-bottom:8px">📄 给定材料 <span class="m-hint">（疑点提示将在作答后显示）</span></summary><div class="material" style="max-height:340px">${stripCallouts(c.material)}</div></details>` : ''}
   <div class="qhead"><span class="tag">${esc(c.module)}/${esc(c.category)}</span><span class="tag">${esc((c.kadian || '').split('/').pop().slice(0, 22))}</span></div>
   <div class="stem exam-q">${c.stem || '<i>（题干为图片）</i>'}</div>
@@ -1598,16 +1769,22 @@ function renderExam() {
     document.querySelectorAll('.opt').forEach(x => x.classList.toggle('sel', x === el));
     const dot = document.querySelectorAll('.exam-dot')[E.cur];
     if (dot) dot.classList.add('answered');
+    examSave();
   });
   lazyImgs();
 }
 function examGoto(i) {
   const E = state.exam; if (!E || i < 0 || i >= E.total) return;
-  E.cur = i; renderExam();
+  E.cur = i; renderExam(); examSave();
+  /* 手机上答题卡是折叠的：点完题号就收起来，否则得再往下滚一屏才看到题干 */
+  const d = document.querySelector('details.exam-card');
+  if (d && window.innerWidth < 720) d.open = false;
 }
 
 async function examSubmit(auto) {
   const E = state.exam; if (!E || E.submitted) return;
+  const blank = E.items.filter(x => !x.chosen).length;
+  if (!auto && blank > 0 && !confirm(`还有 ${blank} 题没作答，确定交卷吗？\n（未作答按 0 分计入卷面，但不会写进记忆曲线）`)) return;
   E.submitted = true; clearInterval(E.timer);
   const used = Math.round((E.minutes * 60 * 1000 - Math.max(0, E.deadline - Date.now())) / 1000);
   /* answered=false 的题只计入卷面分，不写记忆曲线（跳过≠遗忘） */
@@ -1615,11 +1792,16 @@ async function examSubmit(auto) {
     id: x.card.id,
     correct: !!(x.chosen && x.chosen === x.card.answer),
     answered: !!x.chosen,
+    chosen: x.chosen || '',
+    answer: x.card.answer || '',
   }));
   showMask('正在判分并写入记忆曲线…');
   let res;
-  try { res = await POST('/api/exam/submit', { title: E.title, duration: used, items }); }
-  catch (e) {
+  try {
+    res = await POST('/api/exam/submit', {
+      title: E.title, duration: used, items, score_mode: E.scoreMode, paper: E.paper,
+    });
+  } catch (e) {
     hideMask(); E.submitted = false;
     if (E.deadline > Date.now()) E.timer = setInterval(examTick, 1000);
     toast('交卷没成功：' + (e && e.message ? e.message : e) + '　请再点一次「交卷」', 'bad');
@@ -1627,6 +1809,7 @@ async function examSubmit(auto) {
   }
   hideMask();
   const answered = E.items.filter(x => x.chosen).length;
+  const bd = res.breakdown || [];
   app.innerHTML = `
   <div class="exam-result card">
     <div class="sub" style="margin-bottom:6px">${auto ? '⏰ 时间到，已自动交卷' : '🎉 交卷成功'}</div>
@@ -1636,6 +1819,13 @@ async function examSubmit(auto) {
       <span class="tag">共 ${res.total} 题</span><span class="tag review">答对 ${res.correct}</span>
       <span class="tag">作答 ${answered}</span><span class="tag">用时 ${Math.floor(used / 60)}分${used % 60}秒</span>
     </div>
+    ${bd.length ? `<div style="text-align:left;max-width:560px;margin:0 auto 16px;overflow:auto">
+      <table><thead><tr><th>模块</th><th>题量</th><th>作答</th><th>答对</th><th>模块得分</th></tr></thead><tbody>
+      ${bd.map(b => `<tr><td>${esc(b.module)}</td><td>${b.n}</td><td>${b.answered}</td>
+        <td style="color:var(--ok)">${b.correct}</td>
+        <td><b style="color:${b.score >= 60 ? 'var(--ok)' : 'var(--warn)'}">${b.score}</b></td></tr>`).join('')}
+      </tbody></table>
+      <p class="sub" style="margin:10px 0 0">计分口径：${esc(SCORE_MODES[res.score_mode] || SCORE_MODES.weight)}</p></div>` : ''}
     <p class="sub">成绩已按「对→一般 / 错→忘记」写入记忆曲线，错题自动进错题本。</p>
     <div class="row" style="justify-content:center">
       <button class="btn" onclick="examReview()">逐题查看</button>
@@ -1647,12 +1837,14 @@ async function examSubmit(auto) {
   <div id="ex-review"></div>`;
   scheduleSide();
 }
+
 function examReview() {
   const E = state.exam; const box = document.getElementById('ex-review');
+  if (!E || !box) return;
   box.innerHTML = `<h2>逐题对照</h2>` + E.items.map((x, i) => {
     const c = x.card; const ok = x.chosen && x.chosen === c.answer;
     return `<div class="card" style="margin-bottom:12px">
-      <div class="row" style="justify-content:space-between"><b>第 ${i + 1} 题</b>
+      <div class="row" style="justify-content:space-between"><b>第 ${i + 1} 题 · ${esc(c.module || '')}</b>
         <span class="tag ${ok ? 'review' : 'learning'}">${ok ? '✓ 正确' : (x.chosen ? '✗ 选' + x.chosen + '，应' + c.answer : '未作答，应' + c.answer)}</span></div>
       <div class="stem" style="font-size:15px;margin:10px 0">${c.stem}</div>
       <div class="opts">${c.options.map(o => `<div class="opt ${o.is_answer ? 'show-ans' : ''} ${x.chosen === o.key && !o.is_answer ? 'wrong' : ''}">
@@ -1660,6 +1852,79 @@ function examReview() {
     </div>`;
   }).join('');
   box.scrollIntoView({ behavior: 'smooth' });
+}
+
+/* ---------- 历史记录：列表 + 单次答题卡快照 ---------- */
+async function loadExamHistory() {
+  const box = document.getElementById('e-hist'); if (!box) return;
+  let d; try { d = await API('/api/exam/history'); } catch (e) { box.innerHTML = `<div class="empty" style="padding:24px">${esc(e.message || e)}</div>`; return; }
+  if (!d.rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">还没有模考记录</div>'; return; }
+  box.innerHTML = `<table><thead><tr><th>时间</th><th>名称</th><th>题量</th><th>正确</th><th>得分</th><th>计分</th><th>用时</th><th></th></tr></thead><tbody>
+    ${d.rows.map(r => `<tr><td>${esc((r.ts || '').replace('T', ' ').slice(0, 16))}</td><td>${esc(r.title)}</td>
+      <td>${r.total}</td><td style="color:var(--ok)">${r.correct}</td>
+      <td><b style="color:${r.score >= 60 ? 'var(--ok)' : 'var(--warn)'}">${r.score}</b></td>
+      <td class="sub" style="margin:0">${r.blueprint ? (r.blueprint.score_mode === 'even' ? '等分' : '加权') : '等分'}</td>
+      <td>${Math.floor((r.duration || 0) / 60)}分${(r.duration || 0) % 60}秒</td>
+      <td><button class="btn ghost sm" onclick="examShowHistory(${r.id})">答题卡</button></td></tr>`).join('')}</tbody></table>`;
+}
+
+async function examShowHistory(hid) {
+  const box = document.getElementById('e-hist-detail'); if (!box) return;
+  box.innerHTML = `<div class="loading" style="padding:24px"><div class="spinner"></div><div class="loading-txt">读取答题卡…</div></div>`;
+  let d; try { d = await API('/api/exam/history?id=' + hid); } catch (e) { box.innerHTML = `<div class="card">${esc(e.message || e)}</div>`; return; }
+  const row = d.row, detail = row.detail || [];
+  if (!detail.length) { box.innerHTML = `<div class="card"><div class="sub" style="margin:0">这条记录是旧版本存的，没有答题卡快照。</div></div>`; return; }
+  let bp = null; try { bp = typeof row.blueprint === 'string' ? JSON.parse(row.blueprint) : row.blueprint; } catch (e) { bp = null; }
+  /* 按模块汇总（模块顺序取快照里记录的卷面顺序，老记录就按出现顺序） */
+  const order = (bp && bp.order) || [];
+  const byMod = {};
+  detail.forEach(x => {
+    const m = x.module || '其他';
+    const b = byMod[m] || (byMod[m] = { n: 0, correct: 0, answered: 0, items: [] });
+    b.n++; b.answered += x.answered ? 1 : 0; b.correct += x.correct ? 1 : 0; b.items.push(x);
+  });
+  const mods = Object.keys(byMod).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const cls = x => x.correct ? 'ok' : (x.answered ? 'bad' : 'blank');
+  box.innerHTML = `<h2>第 ${row.id} 次 · ${esc(row.title)}</h2>
+  <div class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <div><b style="font-size:20px">${row.score}</b> 分 <span class="sub" style="margin:0">· ${row.total} 题 · 答对 ${row.correct} · ${esc((row.ts || '').replace('T', ' ').slice(0, 16))}</span></div>
+      <button class="btn ghost sm" onclick="document.getElementById('e-hist-detail').innerHTML=''">收起</button>
+    </div>
+    <div style="overflow:auto"><table><thead><tr><th>模块</th><th>题量</th><th>作答</th><th>答对</th><th>正确率</th></tr></thead><tbody>
+      ${mods.map(m => { const b = byMod[m]; const p = b.answered ? Math.round(b.correct / b.answered * 100) : 0;
+        return `<tr><td>${esc(m)}</td><td>${b.n}</td><td>${b.answered}</td>
+          <td style="color:var(--ok)">${b.correct}</td><td>${p}%</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <p class="sub" style="margin:12px 0 0">点题号看原题（绿=对，红=错，灰=未作答）</p>
+    <div class="exam-nav">${mods.map(m => `<div class="exam-grp">
+      <div class="exam-grp-h">${esc(m)}<span>${byMod[m].n} 题</span></div>
+      <div class="exam-grp-b">${byMod[m].items.map(x => `<button class="exam-dot snap ${cls(x)}" onclick="examSnapQ(${x.id})">${detail.indexOf(x) + 1}</button>`).join('')}</div>
+    </div>`).join('')}</div>
+  </div>
+  <div id="e-snap-q"></div>`;
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+
+async function examSnapQ(qid) {
+  const box = document.getElementById('e-snap-q'); if (!box) return;
+  box.innerHTML = `<div class="loading" style="padding:20px"><div class="spinner"></div></div>`;
+  let d; try { d = await API('/api/question?id=' + qid); } catch (e) { box.innerHTML = `<div class="card">${esc(e.message || e)}</div>`; return; }
+  const c = d.card;
+  box.innerHTML = `<div class="card" style="margin-top:12px">
+    <div class="row" style="justify-content:space-between"><b>${esc(c.module)}/${esc(c.category)}</b>
+      <span class="tag review">答案 ${esc(c.answer || '')}</span></div>
+    ${c.material ? `<details class="material-wrap" style="margin-top:10px"><summary style="cursor:pointer;color:var(--brand)">📄 给定材料</summary><div class="material">${stripCallouts(c.material)}</div></details>` : ''}
+    <div class="stem" style="font-size:15px;margin:10px 0">${c.stem || ''}</div>
+    <div class="opts">${c.options.map(o => `<div class="opt ${o.is_answer ? 'show-ans' : ''}">
+      <span class="k">${o.key}</span><span class="body">${o.html || esc(o.label)}</span></div>`).join('')}</div>
+    ${c.analysis ? `<div class="sec" style="margin-top:12px"><h4>📘 官方解析</h4>${c.analysis}</div>` : ''}
+  </div>`;
+  lazyImgs(box);
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 /* ---------- stats ---------- */

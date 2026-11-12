@@ -98,6 +98,55 @@ def now():
 # 注意：这个池**不允许**再叠加 exclude（近期已练去重）——复习题本来就是练过的题。
 DUE_REVIEW_WHERE = "s.status!='new' AND s.due IS NOT NULL AND s.due<=?"
 
+# ---------- 行测真实卷面：模块顺序与分值 ----------
+# 顺序：国考/多数省考的卷面就是「政治理论(2025 起新增) → 常识 → 言语 → 数量 → 判断 → 资料」。
+# 模考按这个顺序排题，而不是随机打散 —— 真实考试里「第 91 题起全是资料分析」本身就是
+# 一种体力分配策略，随机打散反而练不出来。
+MODULE_ORDER = ["政治理论", "常识判断", "言语理解与表达",
+                "数量关系", "判断推理", "资料分析"]
+
+# 每题分值权重：官方从不公布行测分值，这是市面上最通行的一套估分口径
+# （常识 0.5 / 言语 0.8 / 数量 1.0 / 判断 0.8 / 资料 1.0）。
+# 交卷时按 Σ权重 归一到 100 分，所以模块构成不同也还是百分制。
+MODULE_WEIGHT = {"政治理论": 0.5, "常识判断": 0.5,
+                 "言语理解与表达": 0.8, "数量关系": 1.0,
+                 "判断推理": 0.8, "资料分析": 1.0}
+DEFAULT_WEIGHT = 0.8
+
+
+def module_rank(m):
+    """模块在卷面上的序号；不认识的模块排到最后，不抛异常。"""
+    try:
+        return MODULE_ORDER.index(m)
+    except ValueError:
+        return len(MODULE_ORDER)
+
+
+def module_weight(m):
+    return MODULE_WEIGHT.get(m, DEFAULT_WEIGHT)
+
+
+def exam_order_key(row):
+    """卷面排序键：先模块顺序，再按 id（同模块内保持题库原始先后）。"""
+    return (module_rank(row["module"]), row["id"])
+
+
+def score_exam(items, mode="weight"):
+    """算卷面分。items: [{module, correct}]。
+
+    weight（默认）：按模块每题权重加权，归一到 100 —— 这才接近真实估分，
+                    否则「资料分析 1 题」和「常识 1 题」同分，会系统性高估。
+    even：每题等分，纯正确率。
+    """
+    if not items:
+        return 0.0
+    if mode == "even":
+        return round(sum(1 for x in items if x["correct"]) / len(items) * 100, 1)
+    total_w = sum(module_weight(x["module"]) for x in items)
+    got_w = sum(module_weight(x["module"]) for x in items if x["correct"])
+    return round(got_w / total_w * 100, 1) if total_w else 0.0
+
+
 _APP_VER = {"v": None, "sig": None}
 
 def app_ver():
@@ -425,6 +474,9 @@ def ensure_tables():
     CREATE TABLE IF NOT EXISTS exam_history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT, total INT, correct INT, score REAL, duration INT, ts TEXT);
+    -- 断点续考：一张卷只留一行，交卷/放弃即删（payload 是 JSON，见 api_exam_save）
+    CREATE TABLE IF NOT EXISTS exam_progress(
+        user_id TEXT PRIMARY KEY, payload TEXT, updated TEXT);
     """)
     for k, v in (("daily_goal", "20"), ("daily_new", "20"), ("daily_review", "200")):
         if not q_one("SELECT value FROM settings WHERE key=?", (k,)):
@@ -442,6 +494,17 @@ def ensure_tables():
         db().commit()
     except Exception:
         pass
+    # 模考成绩单：paper 记整卷来源，blueprint 记计分口径与模块构成，
+    # detail 记当时的答题卡快照（历史记录可以回看「第 37 题我选了什么」）。
+    # 必须放在 executescript 之后 —— 建表语句里的 exam_history 是老结构（见修复史 24/31）。
+    for ddl in ("ALTER TABLE exam_history ADD COLUMN paper TEXT",
+                "ALTER TABLE exam_history ADD COLUMN blueprint TEXT",
+                "ALTER TABLE exam_history ADD COLUMN detail TEXT"):
+        try:
+            db().execute(ddl)
+            db().commit()
+        except Exception:
+            pass
     # 学习步：记录当前停在第几个学习步（1 分钟 / 10 分钟），老库补列幂等。
     # 学习步必须持久化，否则刷新页面就丢「这题还在 10 分钟档」的状态。
     try:
@@ -644,7 +707,7 @@ def plain_text(html, n=None):
     return s[:n] if n else s
 
 
-def build_where(module, category, kadian):
+def build_where(module, category, kadian, region=None, year=None, paper=None):
     cond, args = [], []
     if module:
         cond.append("q.module=?"); args.append(module)
@@ -652,6 +715,13 @@ def build_where(module, category, kadian):
         cond.append("q.category=?"); args.append(category)
     if kadian:
         cond.append("q.kadian LIKE ?"); args.append("%" + kadian + "%")
+    # 真题整卷组卷：地区/年份/试卷名三者可单独或组合使用
+    if region:
+        cond.append("q.region=?"); args.append(region)
+    if year:
+        cond.append("q.year=?"); args.append(year)
+    if paper:
+        cond.append("q.paper=?"); args.append(paper)
     return (" AND " + " AND ".join(cond)) if cond else "", args
 
 
@@ -1215,6 +1285,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/limits": self.api_limits,
             "/api/doubt": self.api_doubt,
             "/api/exam/submit": self.api_exam_submit,
+            "/api/exam/save": self.api_exam_save,
+            "/api/exam/discard": self.api_exam_discard,
             "/api/users/rename": self.api_users_rename,
             "/api/users/delete": self.api_users_delete,
             # 账号：注册 / 登录 / 退出 / 改密码 / 老账号补设密码
@@ -1365,9 +1437,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/next":
             mode = g("mode", "mix")
-            size = max(1, min(60, _int(g("size"), 10)))
+            # 模考整卷可能有 135 题，60 的上限会把真题卷截断成半套
+            size_cap = 200 if mode == "exam" else 60
+            size = max(1, min(size_cap, _int(g("size"), 10)))
             uid = need_uid(g("token"))
-            cond, args = build_where(g("module"), g("category"), g("kadian"))
+            cond, args = build_where(g("module"), g("category"), g("kadian"),
+                                     g("region"), g("year"), g("paper"))
             ref = g("ref")
             # 跨次去重：排除近期已练习过的 qid（由前端传入，限额 500，仅作用于新题补充分支）
             excl = g("exclude", "")
@@ -1453,8 +1528,13 @@ class Handler(BaseHTTPRequestHandler):
                 # 模考组卷：从整个题库随机抽（含已学题）。
                 # 以前 exam 走 new 分支，只抽「未学」题 —— 学到后期题库耗尽就组不出卷，
                 # 而模考本来就是检验「已学得怎么样」，不该只考没见过的题。
+                # 指定 region/year/paper 时不随机：整卷全取，再按卷面模块顺序排好。
+                exact = bool(g("paper") or g("region") or g("year"))
                 rows = q_all(f"""SELECT * FROM qdb.questions q
-                                WHERE 1=1{cond} ORDER BY RANDOM() LIMIT ?""", (*args, size))
+                                WHERE 1=1{cond} ORDER BY {'q.id' if exact else 'RANDOM()'} LIMIT ?""",
+                             (*args, size))
+                # 卷面顺序：政治理论 → 常识 → 言语 → 数量 → 判断 → 资料（同模块内按 id）
+                rows.sort(key=exam_order_key)
             else:  # new / study
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE {NEW}{cond}{excl_clause} ORDER BY RANDOM() LIMIT ?""", (uid, *ea, size))
@@ -1645,8 +1725,61 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/exam/history":
             uid = need_uid(g("token"))
-            rows = q_all("SELECT * FROM exam_history WHERE user_id=? ORDER BY id DESC LIMIT 30", (uid,))
+            hid = _int(g("id"), 0)
+            if hid:
+                # 单次成绩详情：返回当时的答题卡快照，可回看「哪题选了什么」
+                r = q_one("SELECT * FROM exam_history WHERE id=? AND user_id=?", (hid, uid))
+                if not r:
+                    return self._send(404, {"error": "没有这条模考记录"})
+                for k in ("detail", "blueprint"):
+                    try:
+                        r[k] = json.loads(r[k]) if r.get(k) else None
+                    except Exception:
+                        r[k] = None
+                return self._send(200, {"row": r})
+            rows = q_all("""SELECT id,title,total,correct,score,duration,ts,paper,blueprint
+                            FROM exam_history WHERE user_id=? ORDER BY id DESC LIMIT 30""", (uid,))
+            for r in rows:
+                # 列表只需要知道「这卷是不是整卷真题、按什么口径算的分」
+                try:
+                    bp = json.loads(r["blueprint"]) if r.get("blueprint") else None
+                except Exception:
+                    bp = None
+                r["blueprint"] = {"score_mode": (bp or {}).get("score_mode", "weight"),
+                                  "paper": (bp or {}).get("paper") or r.get("paper") or ""} if bp else None
             return self._send(200, {"rows": rows})
+
+        if path == "/api/exam/papers":
+            # 可一键组卷的真题整卷清单。只列题量 ≥20 的，零散的单题不成卷。
+            need_uid(g("token"))
+            rows = q_all("""SELECT region, year, paper, COUNT(*) n
+                            FROM qdb.questions
+                            WHERE paper IS NOT NULL AND paper<>''
+                            GROUP BY region, year, paper HAVING n>=20
+                            ORDER BY year DESC, region, paper""")
+            return self._send(200, {"rows": rows})
+
+        if path == "/api/exam/resume":
+            uid = need_uid(g("token"))
+            r = q_one("SELECT payload,updated FROM exam_progress WHERE user_id=?", (uid,))
+            if not r:
+                return self._send(200, {"ok": True, "progress": None})
+            try:
+                payload = json.loads(r["payload"])
+            except Exception:
+                return self._send(200, {"ok": True, "progress": None})
+            # 超过 6 小时未动的卷视为放弃：没人会隔天接着做一张行测卷，
+            # 留着只会让人以为「有任务没完成」。
+            try:
+                age = (datetime.datetime.now()
+                       - datetime.datetime.fromisoformat(r["updated"])).total_seconds()
+            except Exception:
+                age = 0
+            if age > 6 * 3600:
+                db().execute("DELETE FROM exam_progress WHERE user_id=?", (uid,)); db().commit()
+                return self._send(200, {"ok": True, "progress": None})
+            payload["updated"] = r["updated"]
+            return self._send(200, {"ok": True, "progress": payload})
 
         # ---------- 账号 ----------
         if path == "/api/users":
@@ -1935,10 +2068,36 @@ class Handler(BaseHTTPRequestHandler):
             db().commit()
         return self._send(200, {"ok": True, "status": status})
 
+    def api_exam_save(self, p):
+        """断点续考：把进行中的卷存到服务端（换设备/关浏览器都能接着做）。
+
+        只存「题号 + 选了什么 + 截止时间戳」，不存题干材料 —— 重开时按 id 重新取题，
+        避免一次塞进几百 KB 的 HTML（也顺带保证题干是库里的最新版本）。
+        """
+        uid = need_uid(p.get("token"))
+        payload = p.get("payload")
+        if not isinstance(payload, dict) or not payload.get("items"):
+            return self._send(400, {"error": "没有可保存的进度"})
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(raw) > 600 * 1024:
+            return self._send(413, {"error": "进度太大，无法保存"})
+        with _LOCK:
+            db().execute("INSERT OR REPLACE INTO exam_progress(user_id,payload,updated) VALUES(?,?,?)",
+                         (uid, raw, now()))
+            db().commit()
+        return self._send(200, {"ok": True})
+
+    def api_exam_discard(self, p):
+        uid = need_uid(p.get("token"))
+        db().execute("DELETE FROM exam_progress WHERE user_id=?", (uid,))
+        db().commit()
+        return self._send(200, {"ok": True})
+
     def api_exam_submit(self, p):
         items = p.get("items") or []
         title = (p.get("title") or "模拟考试").strip()[:40]
         duration = int(p.get("duration") or 0)
+        score_mode = "even" if (p.get("score_mode") or "weight") == "even" else "weight"
         uid = need_uid(p.get("token"))
         total = len(items); correct = 0
         eqids = [resolve_qid(int(it.get("id", 0) or 0)) for it in items]
@@ -1946,21 +2105,57 @@ class Handler(BaseHTTPRequestHandler):
         # 但不写记忆曲线 —— 跳过不等于遗忘，按「忘记」记账会平白把间隔打回起点。
         answered = [bool(it.get("answered", True)) for it in items]
         ensure_srs_rows(uid, [q for q, a in zip(eqids, answered) if q and a])   # 只给真做过的题补行
+
+        # 模块归属由服务端查库决定，不信前端传的 module —— 否则改一下请求就能刷高分
+        mods = {}
+        live = [q for q in eqids if q]
+        for i in range(0, len(live), 400):
+            chunk = live[i:i + 400]
+            for r in q_all("SELECT qid,module FROM qdb.questions WHERE qid IN (%s)"
+                           % ",".join("?" * len(chunk)), chunk):
+                mods[r["qid"]] = r["module"]
+
+        scored, detail, by_mod = [], [], {}
         with _LOCK:
             for it, eqid, ans in zip(items, eqids, answered):
                 if not eqid:
                     continue
                 ok = bool(it.get("correct"))
+                m = mods.get(eqid) or "未分类"
                 if ok:
                     correct += 1
+                scored.append({"module": m, "correct": ok})
+                detail.append({"id": it.get("id"), "qid": eqid, "module": m,
+                               "chosen": it.get("chosen") or "", "answer": it.get("answer") or "",
+                               "correct": ok, "answered": ans})
+                b = by_mod.setdefault(m, {"n": 0, "correct": 0, "answered": 0})
+                b["n"] += 1
+                b["answered"] += 1 if ans else 0
+                b["correct"] += 1 if ok else 0
                 if not ans:
                     continue
                 self._apply_grade(eqid, 4 if ok else 1, uid, 1 if it.get("timeout") else 0)
-            score = round(correct / total * 100, 1) if total else 0
-            db().execute("""INSERT INTO exam_history(title,total,correct,score,duration,ts,user_id)
-                            VALUES(?,?,?,?,?,?,?)""", (title, total, correct, score, duration, now(), uid))
+            score = score_exam(scored, score_mode)
+            # 模块明细按卷面顺序给出，前端直接渲染成绩单
+            breakdown = [dict(by_mod[m], module=m,
+                              weight=round(module_weight(m), 2),
+                              score=score_exam([x for x in scored if x["module"] == m], "weight"))
+                         for m in sorted(by_mod, key=module_rank)]
+            paper = (p.get("paper") or "").strip()[:120]
+            blueprint = json.dumps({"score_mode": score_mode, "paper": paper,
+                                    "order": MODULE_ORDER, "modules": by_mod},
+                                   ensure_ascii=False)
+            cur = db().execute("""INSERT INTO exam_history(title,total,correct,score,duration,ts,user_id,
+                                                          paper,blueprint,detail)
+                                  VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                               (title, total, correct, score, duration, now(), uid,
+                                paper, blueprint, json.dumps(detail, ensure_ascii=False)))
+            hid = cur.lastrowid
+            db().execute("DELETE FROM exam_progress WHERE user_id=?", (uid,))   # 交卷即清存档
             db().commit()
-        return self._send(200, {"ok": True, "total": total, "correct": correct, "score": score})
+        return self._send(200, {"ok": True, "id": hid, "total": total, "correct": correct,
+                                "score": score, "score_mode": score_mode,
+                                "breakdown": breakdown})
 
 
     # ---------- 账号：注册 / 登录 / 退出 / 密码 ----------
@@ -2050,7 +2245,7 @@ class Handler(BaseHTTPRequestHandler):
                 u = q_one("SELECT id,anon FROM users WHERE token=?", (tok,))
                 if u and u["anon"]:
                     # 游客账号：退出即彻底清除，不留痕迹
-                    for t in ("srs", "reviews", "notes", "favorites", "doubt_status", "exam_history"):
+                    for t in ("srs", "reviews", "notes", "favorites", "doubt_status", "exam_history", "exam_progress"):
                         db().execute(f"DELETE FROM {t} WHERE user_id=?", (u["id"],))
                     db().execute("DELETE FROM users WHERE id=?", (u["id"],))
                 else:
@@ -2202,7 +2397,7 @@ class Handler(BaseHTTPRequestHandler):
         if not pw_verify(p.get("password") or "", r["pw_hash"] or ""):
             return self._send(400, {"error": "密码不正确，删除已取消"})
         with _LOCK:
-            for t in ("srs", "reviews", "notes", "favorites", "doubt_status", "exam_history"):
+            for t in ("srs", "reviews", "notes", "favorites", "doubt_status", "exam_history", "exam_progress"):
                 db().execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
             db().execute("DELETE FROM users WHERE id=?", (uid,))
             db().commit()
