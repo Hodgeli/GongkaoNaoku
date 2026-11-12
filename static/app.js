@@ -121,6 +121,15 @@ function downloadMd(filename, text) {
 }
 
 const MODE_LABEL = { new: '新题', mix: '智能复习', review: '复习', wrong: '错题重练', wrongredo: '错题重练', fav: '收藏练习', material: '材料组题' };
+
+/* due 有两种格式：长间隔是「2026-11-13」，学习步是「2026-11-12T16:03:00」。
+   直接字符串比较会漏判（'...T16:03' <= '2026-11-12' 为假），所以统一先截到日期再比。 */
+function isDue(d) { return !!d && String(d).slice(0, 10) <= BOOT.today; }
+function fmtDue(d) {
+  if (!d) return '—';
+  const s = String(d);
+  return s.length > 10 ? s.slice(0, 10) + ' ' + s.slice(11, 16) : s;
+}
 const GRADE_LABEL = { 1: '忘记', 3: '困难', 4: '一般', 5: '熟悉' };
 
 /* ---------- 练习 session 本地快照（继续上次刷题） ---------- */
@@ -238,7 +247,9 @@ async function refreshSide(pre) {
   try {
     const s = pre || await API('/api/stats');
     document.getElementById('side-stats').innerHTML = `
-      <div class="stat-chip"><span>待复习</span><b style="color:var(--warn)">${s.due_review}</b></div>
+      <div class="stat-chip" title="学习步里的题会在 1~10 分钟后自己回来，不计入当前待复习">
+        <span>待复习</span><b style="color:var(--warn)">${s.due_review}</b>
+        ${s.due_soon ? `<i style="font-style:normal;font-size:11px;color:var(--ink-3);margin-left:4px">+${s.due_soon}</i>` : ''}</div>
       <div class="stat-chip"><span>未学新题</span><b style="color:var(--brand)">${s.new}</b></div>
       <div class="stat-chip"><span>已学</span><b>${s.learned}</b></div>
       <div class="stat-chip"><span>今日已练</span><b style="color:var(--ok)">${s.studied_today}</b></div>
@@ -464,7 +475,8 @@ async function viewDashboard() {
   app.innerHTML = `
   <h1>总览面板</h1><p class="sub">共 ${BOOT.total.toLocaleString()} 道行测真题 · 逐题深度标注 · 按记忆曲线安排复习</p>
   <div class="grid g4">
-    <div class="card kpi warn"><div class="n">${s.due_review}</div><div class="l">🔔 今日待复习</div></div>
+    <div class="card kpi warn"><div class="n">${s.due_review}</div><div class="l">🔔 今日待复习</div>
+      ${s.due_soon ? `<div class="sub" style="margin-top:6px">另有 ${s.due_soon} 道 30 分钟内到期</div>` : ''}</div>
     <div class="card kpi brand"><div class="n">${s.new.toLocaleString()}</div><div class="l">✨ 未学新题</div></div>
     <div class="card kpi ok"><div class="n">${s.studied_today}</div><div class="l">✅ 今日已练习</div></div>
     <div class="card kpi purple"><div class="n">${s.learned.toLocaleString()}</div><div class="l">📈 已纳入复习</div></div>
@@ -484,6 +496,10 @@ async function viewDashboard() {
       <a class="btn big ghost" href="#/kadian">考点导航</a>
       <a class="btn big ghost" href="#/materials">材料组题</a>
       <a class="btn big ghost" href="#/doubts">疑点复核</a>
+    </div>
+    <div class="sub" style="margin-top:12px">
+      今日新题 <b>${s.today_new}</b>/${s.limit_new || '不限'} · 今日复习 <b>${s.today_review}</b>/${s.limit_review || '不限'}
+      <a href="#/settings" style="margin-left:6px">调整上限</a>
     </div>
   </div>
   <h2>各模块进度</h2>
@@ -586,15 +602,27 @@ async function startSession(cfg) {
   let res;
   try { res = await API('/api/next?' + p); } catch (e) { return fatal(e); }
   if (!res.cards.length) {
-    const emptyMsg = {
-      review: ['没有到期需要复习的题目', '去练习一些新题，或换个范围。'],
-      wrong: ['错题本是空的', '先去练习，答错的题会自动收集到这里。'],
-      fav: ['还没有收藏任何题目', '练习时在答案页点「⭐ 收藏」即可加入。'],
-      material: ['这组材料没有更多题目了', '回到材料组题页选别的材料。'],
-    }[cfg.mode] || ['这个范围的题都学过啦', '换个模块/大类试试。'];
-    app.innerHTML = `<div class="empty"><div class="big">🎉</div>
-      <h2>${emptyMsg[0]}</h2><p>${emptyMsg[1]}</p>
-      <div class="row"><a class="btn" href="#/study">练习新题</a><a class="btn ghost" href="#/">返回总览</a></div></div>`;
+    /* 每日额度用完：这不是「没题了」，必须说清楚，否则用户会以为题库抽空/程序坏了 */
+    const q = (res.quota || {})[res.limited] || [];
+    const emptyMsg = res.limited ? {
+      new: [`今天的 ${q[1] || ''} 道新题已经刷完了`, `留着明天继续——一天刷太多，第二天会被积压的复习题埋掉。想多刷可到「设置 → 每日上限」调高。`],
+      review: [`今天的 ${q[1] || ''} 道复习额度已经用完`, `休息一下，剩下的题明天再来。想继续可到「设置 → 每日上限」调高。`],
+    }[res.limited] : null;
+    const msg = emptyMsg
+      || (cfg.mode === 'review' && res.due_soon
+        ? [`还有 ${res.due_soon} 道题在几分钟内到期`, '刚评过「忘记」的题要过 1~10 分钟才会回到队列，稍等一下再进来。']
+        : null)
+      || ({
+        review: ['没有到期需要复习的题目', '去练习一些新题，或换个范围。'],
+        wrong: ['错题本是空的', '先去练习，答错的题会自动收集到这里。'],
+        fav: ['还没有收藏任何题目', '练习时在答案页点「⭐ 收藏」即可加入。'],
+        material: ['这组材料没有更多题目了', '回到材料组题页选别的材料。'],
+      }[cfg.mode] || ['这个范围的题都学过啦', '换个模块/大类试试。']);
+    app.innerHTML = `<div class="empty"><div class="big">${res.limited ? '🌙' : '🎉'}</div>
+      <h2>${msg[0]}</h2><p>${msg[1]}</p>
+      <div class="row">
+        ${res.limited ? '<a class="btn" href="#/settings">调整每日上限</a>' : '<a class="btn" href="#/study">练习新题</a>'}
+        <a class="btn ghost" href="#/">返回总览</a></div></div>`;
     return;
   }
   state.session = {
@@ -628,6 +656,7 @@ function renderCard() {
     <button class="qtool ${S.marked.has(c.id) ? 'on' : ''}" id="t-mark" title="临时标记本题（仅本组有效，便于复盘）">⚑ ${S.marked.has(c.id) ? '已标记' : '标记'}</button>
     <a class="linkback" href="#/detail?id=${c.id}">查看完整标注</a>
     ${c.verified ? `<span class="tag vbadge" title="该题答案已经过联网权威来源核实，可信">✅ 已联网复核</span>` : ''}
+    ${(c.srs_lapses || 0) >= 8 ? `<span class="tag" style="color:var(--warn)" title="这道题已经遗忘 ${c.srs_lapses} 次。反复重刷收益很低，建议看完解析后写一条自己的笔记，或者换个记法">🔁 顽固题 · 已忘 ${c.srs_lapses} 次</span>` : ''}
   </div>
   ${c.module === '资料分析' && !hasMat ? `<div class="material-wrap mat-missing">⚠️ 本题材料缺失（原始数据未收录），可到「材料组题」模式换其他材料组练习</div>` : ''}
   ${hasMat ? `<details class="material-wrap" open><summary style="cursor:pointer;color:var(--brand);margin-bottom:8px">📄 给定材料 <span class="m-hint">（疑点提示将在作答后显示）</span></summary><div class="material" id="mat-stripped">${stripCallouts(c.material)}</div></details>` : ''}
@@ -817,6 +846,14 @@ async function doGrade(g) {
   if (!ok) return;   // 保留评分按钮，让用户重试，避免"以为记下了其实丢了"
   /* 记下这次评分对应的题与对错：撤销时要把本轮 tally 一起退回去，否则结算数字会多算 */
   LAST_GRADE = { qid: c.qid, right: S.chosen === (S.full && S.full.answer) };
+  /* 忘记 → 服务端已按学习步把它排到 1 分钟后再到期。当前这组题里也排回队列，
+     否则「忘记」的题要等下次开新组才会再出现，学习步就白设了。
+     位置放在 3 题之后，大致对应 1~2 分钟，和 1 分钟学习步对得上。 */
+  if (g < 3 && S.queue && S.queue.length) {
+    const rest = S.queue.length - S.idx - 1;
+    S.queue.splice(S.idx + Math.min(3, Math.max(1, rest)), 0, c);
+    LAST_GRADE.requeued = true;
+  }
   scheduleSide();
   // 前进方式见 autoNextSec()：默认评分后立即切题；设为「不自动」时才停在原题看解析
   S.graded = g;
@@ -834,6 +871,9 @@ async function undoLastGrade() {
   catch (e) { toast('撤销失败：' + (e && e.message ? e.message : e), 'bad'); return; }
   if (!r || !r.ok) { toast((r && r.error) || '撤销失败', 'bad'); return; }
   const S = state.session;
+  /* 忘记时把这道题排回了队列；撤销后要把它去掉，否则同一题会在队列里出现两次。
+     按对象引用去重：只有 splice 插入的那一份是同一个引用。 */
+  const wasRequeued = !!(LAST_GRADE && LAST_GRADE.requeued);
   if (S && LAST_GRADE && LAST_GRADE.qid === r.qid && S.tally) {
     S.tally.done = Math.max(0, S.tally.done - 1);
     if (LAST_GRADE.right) S.tally.right = Math.max(0, S.tally.right - 1);
@@ -841,6 +881,11 @@ async function undoLastGrade() {
     LAST_GRADE = null;
   }
   if (S && S.queue && r.qid) {
+    if (wasRequeued) {
+      const uniq = [];
+      for (const x of S.queue) if (uniq.indexOf(x) < 0) uniq.push(x);
+      S.queue = uniq;
+    }
     const at = S.queue.findIndex(x => x.qid === r.qid);
     if (at >= 0) {
       S.idx = at; S.graded = 0; S.phase = 'question'; S.chosen = null; S.full = null;
@@ -998,6 +1043,10 @@ async function moreCards() {
     if (needExcl(S.mode)) addSeen(res.cards.filter(c => c.is_new !== false).map(c => c.qid));
     S.queue = res.cards; S.idx = 0; return true;
   }
+  if (res.limited) {
+    toast(res.limited === 'new' ? '今日新题额度已用完，明天继续（可在设置里调高）'
+      : '今日复习额度已用完，明天继续（可在设置里调高）', '', { ttl: 6000 });
+  }
   return false;
 }
 
@@ -1114,7 +1163,7 @@ async function viewBrowse(extra) {
       <td>${esc(r.region)}</td><td>${esc(r.year)}</td><td style="color:var(--ok);font-weight:800">${esc(r.answer)}</td>
       <td><span style="color:var(--ok)">${r.correct || 0}</span>/<span style="color:var(--bad)">${r.wrong || 0}</span></td>
       <td><span class="tag ${esc(r.status)}">${{ new: '未学', learning: '学习中', review: '复习中' }[r.status] || r.status}</span></td>
-      <td>${r.status === 'new' ? '—' : esc(r.due) + (r.due <= BOOT.today ? ' ⏰' : '')} ${r.interval ? '<span class="tag">' + r.interval + 'd</span>' : ''}</td>
+      <td>${r.status === 'new' ? '—' : esc(fmtDue(r.due)) + (isDue(r.due) ? ' ⏰' : '')} ${r.interval ? '<span class="tag">' + r.interval + 'd</span>' : ''}</td>
       <td>${r.fav ? '★' : ''}</td>
       <td><a class="linkback" href="#/detail?id=${r.id}">详情</a></td></tr>`).join('')}
   </tbody></table></div>
@@ -1176,7 +1225,7 @@ async function viewWrongbook() {
     <td>${esc(r.region)}</td><td>${esc(r.year)}</td>
     <td style="color:var(--ok);font-weight:800">${esc(r.answer)}</td>
     <td><span class="tag learning">错 ${r.wrong || 0}</span></td>
-    <td>${r.status === 'new' ? '—' : esc(r.due) + (r.due <= BOOT.today ? ' ⏰' : '')}</td>
+    <td>${r.status === 'new' ? '—' : esc(fmtDue(r.due)) + (isDue(r.due) ? ' ⏰' : '')}</td>
     <td><a class="linkback" href="#/detail?id=${r.id}">详情</a></td></tr>`).join('');
   app.innerHTML = `
   <h1>错题本</h1><p class="sub">答错的题会自动收集到这里。连续两次自评「一般/熟悉」将自动移出待重练队列。</p>
@@ -1226,7 +1275,9 @@ async function viewDetail(id) {
     <span class="tag">${esc(c.module)}/${esc(c.category)}</span>
     <span class="tag">${esc(c.region)} ${esc(c.year)}</span>
     <span class="tag ${esc(s ? s.status : 'new')}">${{ new: '未学', learning: '学习中', review: '复习中' }[s ? s.status : 'new'] || ''}</span>
-    <span class="tag">下次复习 ${s ? esc(s.due) : '—'}</span>
+    <span class="tag">下次复习 ${s ? esc(fmtDue(s.due)) : '—'}</span>
+    ${s && s.status === 'learning' ? `<span class="tag" title="学习步：1 分钟 → 10 分钟，走完才毕业成 1 天">学习步 ${Math.min(2, (s.step || 0) + 1)}/2</span>` : ''}
+    ${s && (s.lapses || 0) >= 8 ? `<span class="tag" style="color:var(--warn)" title="已遗忘 ${s.lapses} 次，建议记笔记或换记忆方式">🔁 顽固题</span>` : ''}
   </div>
   <h1 style="font-size:20px">${esc(c.kadian)}</h1>
   <p class="sub">${esc(c.paper || '')}</p>
@@ -1710,9 +1761,22 @@ function viewSettings() {
     </div>
   </div>
   <div class="card" style="max-width:640px;margin-top:16px">
-    <h2 style="margin-top:0">每日目标</h2>
-    <div class="row"><input id="st-goal" type="number" min="1" max="500" style="width:100px"><button class="btn" id="st-goal-save">保存</button>
-      <span class="sub" id="st-goal-cur" style="margin:0"></span></div>
+    <h2 style="margin-top:0">学习节奏</h2>
+    <div class="row" style="gap:10px;flex-wrap:wrap">
+      <label class="sub" style="margin:0">每日目标（题）</label>
+      <input id="st-goal" type="number" min="1" max="500" style="width:90px">
+      <button class="btn" id="st-goal-save">保存</button>
+      <span class="sub" id="st-goal-cur" style="margin:0"></span>
+    </div>
+    <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:14px">
+      <label class="sub" style="margin:0">每日新题上限</label>
+      <input id="st-lim-new" type="number" min="0" max="300" style="width:90px">
+      <label class="sub" style="margin:0 0 0 12px">每日复习上限</label>
+      <input id="st-lim-rev" type="number" min="0" max="2000" style="width:90px">
+    </div>
+    <p class="sub" style="margin:10px 0 0">超出的题会顺延到明天，不会丢；填 <b>0</b> 表示不限量。一天刷太多新题，第二天会被积压的复习题埋掉，20 / 200 是比较稳的节奏。</p>
+    <div class="row" style="margin-top:12px"><button class="btn" id="st-lim-save">保存上限</button>
+      <span class="sub" id="st-lim-cur" style="margin:0"></span></div>
   </div>
   <div class="card" style="max-width:640px;margin-top:16px">
     <h2 style="margin-top:0">📤 数据导出</h2>
@@ -1767,6 +1831,25 @@ function viewSettings() {
       const s = await API('/api/streak');
       document.getElementById('st-goal-cur').textContent = '今日 ' + s.today + '/' + s.goal;
       toast('已保存每日目标：' + v + ' 题');
+    } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); }
+    finally { restore(); }
+  };
+  /* 每日新题 / 复习上限：超量顺延到明天，避免「一天爽刷、第二天被复习埋掉」 */
+  const limNew = document.getElementById('st-lim-new'), limRev = document.getElementById('st-lim-rev');
+  const syncLim = (s) => {
+    limNew.value = s.limit_new; limRev.value = s.limit_review;
+    document.getElementById('st-lim-cur').textContent = `今日已用：新题 ${s.today_new} · 复习 ${s.today_review}`;
+  };
+  API('/api/stats').then(syncLim).catch(() => { });
+  document.getElementById('st-lim-save').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.classList.contains('busy')) return;
+    const restore = busyBtn(b, '保存中…');
+    try {
+      await POST('/api/limits', { daily_new: +limNew.value || 0, daily_review: +limRev.value || 0 });
+      syncLim(await API('/api/stats'));
+      scheduleSide(0);
+      toast('已保存每日上限');
     } catch (err) { toast('保存失败：' + (err && err.message ? err.message : err), 'bad'); }
     finally { restore(); }
   };

@@ -201,6 +201,30 @@ def learned_qids(uid):
     return {r["qid"] for r in q_all("SELECT qid FROM srs WHERE user_id=?", (uid,))}
 
 
+def daily_used(uid):
+    """今日已消耗的「新题 / 复习」额度。
+
+    新题口径：今天评分、且评分前该题 status='new'（reviews.prev_json 里的快照）。
+    不能用 interval_before=0 判断 —— 被「忘记」过的复习题 interval 也是 0，
+    那样会把复习误算成新题，白白吃掉新题额度。
+    复习口径：今天评分总次数 - 新题数（同一题当天多次复习按次计，与 Anki 一致）。
+    """
+    r = q_one("""SELECT COUNT(*) n_all,
+                        SUM(CASE WHEN json_extract(prev_json,'$.status')='new' THEN 1 ELSE 0 END) n_new
+                 FROM reviews WHERE user_id=? AND ts LIKE ?""", (uid, today() + "%"))
+    n_all = (r or {}).get("n_all") or 0
+    n_new = (r or {}).get("n_new") or 0
+    return {"new": n_new, "review": max(0, n_all - n_new)}
+
+
+def daily_quota(uid, kind):
+    """返回 (今日已用, 上限)。上限 <=0 表示不限量。"""
+    used = daily_used(uid).get(kind, 0)
+    key = "daily_new" if kind == "new" else "daily_review"
+    cap = _int(get_setting(key, "0"), 0)
+    return used, cap
+
+
 def q_total():
     """题库总题数（进程内缓存，题库是只读的）。"""
     global _Q_TOTAL
@@ -243,7 +267,7 @@ def _read_ns(prefix, uid_col, uid):
     uid_col 为该命名空间的账号列名（本地为 user_id，云端为 uid）。"""
     return {
         "srs": q_all(f"""SELECT qid,status,ease,interval,repetitions,lapses,due,last_review,
-                                correct,wrong,wb_status,wb_streak,last_choice
+                                correct,wrong,wb_status,wb_streak,last_choice,step
                          FROM {prefix}srs WHERE {uid_col}=?""", (uid,)),
         "reviews": q_all(f"""SELECT id,qid,grade,ts,interval_before,interval_after,ease,timeout
                            FROM {prefix}reviews WHERE {uid_col}=?""", (uid,)),
@@ -265,12 +289,12 @@ def _write_ns(prefix, uid_col, uid, data):
         for r in (data.get("srs") or []):
             db().execute(f"""INSERT OR REPLACE INTO {prefix}srs
                 (qid,{uid_col},status,ease,interval,repetitions,lapses,due,last_review,
-                 correct,wrong,wb_status,wb_streak,last_choice)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 correct,wrong,wb_status,wb_streak,last_choice,step)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (r["qid"], uid, r.get("status", "new"), r.get("ease", 2.5), r.get("interval", 0),
                  r.get("repetitions", 0), r.get("lapses", 0), r.get("due"), r.get("last_review"),
                  r.get("correct", 0), r.get("wrong", 0), r.get("wb_status", "active"),
-                 r.get("wb_streak", 0), r.get("last_choice")))
+                 r.get("wb_streak", 0), r.get("last_choice"), r.get("step", 0)))
         db().execute(f"DELETE FROM {prefix}reviews WHERE {uid_col}=?", (uid,))
         for r in (data.get("reviews") or []):
             db().execute(f"""INSERT OR REPLACE INTO {prefix}reviews
@@ -399,8 +423,9 @@ def ensure_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT, total INT, correct INT, score REAL, duration INT, ts TEXT);
     """)
-    if not q_one("SELECT value FROM settings WHERE key='daily_goal'"):
-        db().execute("INSERT INTO settings(key,value) VALUES('daily_goal','20')")
+    for k, v in (("daily_goal", "20"), ("daily_new", "20"), ("daily_review", "200")):
+        if not q_one("SELECT value FROM settings WHERE key=?", (k,)):
+            db().execute("INSERT INTO settings(key,value) VALUES(?,?)", (k, v))
     db().commit()
     # 游客(匿名)账号标记：anon=1 表示免注册账号，退出时一并清除数据
     try:
@@ -411,6 +436,19 @@ def ensure_tables():
     # 评分撤销：reviews 记录评分前的 srs 快照（老库补列，幂等）
     try:
         db().execute("ALTER TABLE reviews ADD COLUMN prev_json TEXT")
+        db().commit()
+    except Exception:
+        pass
+    # 学习步：记录当前停在第几个学习步（1 分钟 / 10 分钟），老库补列幂等。
+    # 学习步必须持久化，否则刷新页面就丢「这题还在 10 分钟档」的状态。
+    try:
+        db().execute("ALTER TABLE srs ADD COLUMN step INTEGER DEFAULT 0")
+        db().commit()
+    except Exception:
+        pass
+    # 每日额度统计要按「今天」扫 reviews；date(ts) 用不上索引，改用 ts LIKE 前缀匹配
+    try:
+        db().execute("CREATE INDEX IF NOT EXISTS idx_reviews_user_ts ON reviews(user_id, ts)")
         db().commit()
     except Exception:
         pass
@@ -427,7 +465,7 @@ def ensure_tables():
         lapses INTEGER DEFAULT 0, due TEXT, last_review TEXT,
         correct INTEGER DEFAULT 0, wrong INTEGER DEFAULT 0,
         wb_status TEXT DEFAULT 'active', wb_streak INTEGER DEFAULT 0,
-        last_choice TEXT, PRIMARY KEY(qid, uid));
+        last_choice TEXT, step INTEGER DEFAULT 0, PRIMARY KEY(qid, uid));
     CREATE TABLE IF NOT EXISTS cloud_reviews(
         id INTEGER PRIMARY KEY AUTOINCREMENT, qid TEXT, uid TEXT NOT NULL,
         grade INT, ts TEXT, interval_before INT, interval_after INT, ease REAL,
@@ -446,6 +484,12 @@ def ensure_tables():
     CREATE INDEX IF NOT EXISTS idx_cloud_srs ON cloud_srs(uid);
     CREATE INDEX IF NOT EXISTS idx_cloud_rev ON cloud_reviews(uid);
     """)
+    # 老库补列：cloud_srs 必须在上面的建表语句之后补，否则首次启动时表还不存在
+    try:
+        db().execute("ALTER TABLE cloud_srs ADD COLUMN step INTEGER DEFAULT 0")
+        db().commit()
+    except Exception:
+        pass
 
 def get_setting(key, default=None):
     r = q_one("SELECT value FROM settings WHERE key=?", (key,))
@@ -531,6 +575,8 @@ def clean_card(row, reveal=False, uid=DEFAULT_UID):
         "options": json.loads(row["options"] or "[]"),
         "material": safe_material(row["material"]) if not reveal else row["material"],
         "material_ref": row.get("material_ref", ""),
+        # 遗忘次数：前端据此提示「顽固题」，连续遗忘的题该去看解析而不是继续刷
+        "srs_lapses": (row["srs_lapses"] if "srs_lapses" in row.keys() else 0) or 0,
     }
     if not reveal:
         for o in d["options"]:
@@ -761,7 +807,7 @@ def _srs_snapshot(row):
     """评分前的 srs 快照，供「撤销上一次评分」原样恢复。
     只取会被 _apply_grade 改动的列；不存 qid/user_id（由 WHERE 指定）。"""
     keys = ("status", "ease", "interval", "repetitions", "lapses", "due",
-            "last_review", "correct", "wrong", "wb_status", "wb_streak", "last_choice")
+            "last_review", "correct", "wrong", "wb_status", "wb_streak", "last_choice", "step")
     return {k: (row[k] if k in row.keys() else None) for k in keys}
 
 
@@ -952,6 +998,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/note": self.api_note,
             "/api/fav": self.api_fav,
             "/api/goal": self.api_goal,
+            "/api/limits": self.api_limits,
             "/api/doubt": self.api_doubt,
             "/api/exam/submit": self.api_exam_submit,
             "/api/users/rename": self.api_users_rename,
@@ -1056,12 +1103,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"total": total, "modules": mods, "categories": cats, "today": today()})
 
         if path == "/api/stats":
-            t = today(); uid = need_uid(g("token"))
+            t = today(); uid = need_uid(g("token")); tn = now()
             learned = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND status!='new'", (uid,))["n"]
             total_q = q_total()
             due_new = max(0, total_q - learned)   # 没进度行的题都算新题，不必预铺行
+            # 口径统一用 now()：学习步里的题（1/10 分钟后再见）此刻还没到期，
+            # 若按「今天」算进待复习数，就会出现「总览说 8 道、点进去只有 5 道」。
             due_rev = q_one(f"SELECT COUNT(*) n FROM srs s WHERE s.user_id=? AND {DUE_REVIEW_WHERE}",
-                            (uid, t))["n"]
+                            (uid, tn))["n"]
+            # 今天稍后（30 分钟内）到期的题：学习步的题会在刷题过程中自己回来
+            soon_to = (datetime.datetime.now() + datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+            due_soon = q_one(f"""SELECT COUNT(*) n FROM srs s WHERE s.user_id=?
+                                 AND s.status!='new' AND s.due>? AND s.due<=?""",
+                             (uid, tn, soon_to))["n"]
             studied_today = q_one("SELECT COUNT(DISTINCT qid) n FROM reviews WHERE user_id=? AND date(ts)=?", (uid, t))["n"]
             wrong_n = q_one("SELECT COUNT(*) n FROM srs WHERE user_id=? AND wrong>0", (uid,))["n"]
             fav_n = q_one("SELECT COUNT(*) n FROM favorites WHERE user_id=?", (uid,))["n"]
@@ -1070,16 +1124,20 @@ class Handler(BaseHTTPRequestHandler):
                               FROM qdb.questions q LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?
                               GROUP BY q.module""", (uid,))
             due_by_mod = q_all(f"""SELECT q.module m, COUNT(*) n FROM srs s JOIN qdb.questions q ON q.qid=s.qid
-                                  WHERE s.user_id=? AND {DUE_REVIEW_WHERE} GROUP BY q.module""", (uid, t))
+                                  WHERE s.user_id=? AND {DUE_REVIEW_WHERE} GROUP BY q.module""", (uid, tn))
             mastery = q_all("SELECT interval FROM srs WHERE user_id=? AND status!='new'", (uid,))
             buckets = {"学习中": 0, "初记": 0, "短期": 0, "长期": 0, "稳固": 0}
             for r in mastery:
                 buckets[sm2.mastery_bucket(r["interval"])] += 1
+            used = daily_used(uid)
             return self._send(200, {
-                "new": due_new, "due_review": due_rev, "learned": learned,
+                "new": due_new, "due_review": due_rev, "due_soon": due_soon, "learned": learned,
                 "studied_today": studied_today, "by_module": by_mod,
                 "due_by_module": due_by_mod, "mastery": buckets,
                 "wrong": wrong_n, "fav": fav_n,
+                "today_new": used["new"], "today_review": used["review"],
+                "limit_new": _int(get_setting("daily_new", "0"), 0),
+                "limit_review": _int(get_setting("daily_review", "0"), 0),
                 "total": total_q,
             })
 
@@ -1099,8 +1157,27 @@ class Handler(BaseHTTPRequestHandler):
             NEW = "(s.qid IS NULL OR s.status='new')"
             # 带 srs_status 的列清单：前端据此判断「抽到的是新题还是复习题」，
             # 只有新题才写进 kg_seen（近期已练去重名单），避免复习题污染新题去重。
-            SEL = "q.*, IFNULL(s.status,'new') AS srs_status"
+            # srs_lapses 让前端能提示「这题已遗忘 N 次」——顽固题该去看解析、记笔记，
+            # 而不是继续靠反复刷（leech 提示不额外建列，直接读 lapses）。
+            SEL = "q.*, IFNULL(s.status,'new') AS srs_status, IFNULL(s.lapses,0) AS srs_lapses"
             excl_clause = (f" AND q.qid NOT IN ({','.join('?' * len(excl_ids))})") if excl_ids else ""
+            # 每日额度：超量顺延到明天。否则一天能刷 200 道新题，
+            # 第二天一次性涌来 200 道复习，直接被埋掉、然后就弃坑了。
+            used_new, cap_new = daily_quota(uid, "new")
+            used_rev, cap_rev = daily_quota(uid, "review")
+            left_new = max(0, cap_new - used_new) if cap_new > 0 else 10 ** 9
+            left_rev = max(0, cap_rev - used_rev) if cap_rev > 0 else 10 ** 9
+            limited = None
+            if mode in ("new", "study"):
+                if size > left_new:
+                    size = left_new
+                if size <= 0:
+                    limited = "new"
+            elif mode == "review":
+                if size > left_rev:
+                    size = left_rev
+                if size <= 0:
+                    limited = "review"
             if mode == "ids":
                 # 按指定 id 取题（临时标记题复盘），保持传入顺序
                 ids = [int(x) for x in g("ids", "").split(",") if re.fullmatch(r"\d+", x.strip())][:200]
@@ -1129,20 +1206,23 @@ class Handler(BaseHTTPRequestHandler):
             elif mode == "review":
                 # 到期复习：只按 SM-2 到期判断，绝不再套 exclude ——
                 # 到期题必然是「练过的题」，一旦被近期已练去重排除，复习页就会永远为空。
+                # 用 now() 而非 today()：学习步里的题要等到 1/10 分钟后才真正回来。
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE {DUE_REVIEW_WHERE}{cond}
-                                ORDER BY s.due ASC, s.ease ASC LIMIT ?""", (uid, today(), *args, size))
+                                ORDER BY s.due ASC, s.ease ASC LIMIT ?""", (uid, now(), *args, size))
             elif mode == "mix":
                 # 重复练习题优先：答错 > 遗忘(lapses) > 到期复习（此池不受 exclude 限制，刚做错的也能立刻重练）；
                 # 新题仅作补充，且排除近期已练过的，避免无意义重复。
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE 1=1{cond} AND (s.wrong>0 OR s.lapses>0 OR ({DUE_REVIEW_WHERE}))
                                 ORDER BY (CASE WHEN s.wrong>0 THEN 0 WHEN s.lapses>0 THEN 1 ELSE 2 END),
-                                         s.due ASC, RANDOM() LIMIT ?""", (uid, today(), *args, size))
-                if len(rows) < size:
+                                         s.due ASC, RANDOM() LIMIT ?""", (uid, now(), *args, size))
+                # 补充新题也要吃每日新题额度：智能复习同样不该一次塞进 100 道生题
+                fill_n = min(size - len(rows), left_new)
+                if fill_n > 0:
                     fill = q_all(f"""SELECT {SEL} {J}
                                     WHERE 1=1{cond} AND {NEW}{excl_clause} ORDER BY RANDOM() LIMIT ?""",
-                                 (uid, *ea, size - len(rows)))
+                                 (uid, *ea, fill_n))
                     rows += fill
             elif mode == "exam":
                 # 模考组卷：从整个题库随机抽（含已学题）。
@@ -1161,7 +1241,17 @@ class Handler(BaseHTTPRequestHandler):
                 # is_new：让前端只把新题写进「近期已练」名单；无 srs_status 的分支（ids/material）按新题处理
                 c_["is_new"] = (r["srs_status"] == "new") if "srs_status" in r.keys() else True
                 cards.append(c_)
-            return self._send(200, {"mode": mode, "count": len(rows), "cards": cards})
+            # 复习页空了但学习步里的题几分钟后就到：告诉用户「稍等」，别让他以为题刷完了
+            due_soon = 0
+            if mode == "review" and not rows:
+                soon_to = (datetime.datetime.now() + datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+                due_soon = q_one(f"""SELECT COUNT(*) n FROM srs s WHERE s.user_id=?
+                                     AND s.status!='new' AND s.due>? AND s.due<=?""",
+                                 (uid, now(), soon_to))["n"]
+            return self._send(200, {"mode": mode, "count": len(rows), "cards": cards,
+                                    "limited": limited, "due_soon": due_soon,
+                                    "quota": {"new": [used_new, cap_new],
+                                              "review": [used_rev, cap_rev]}})
 
         if path == "/api/question":
             uid = need_uid(g("token"))
@@ -1460,10 +1550,11 @@ class Handler(BaseHTTPRequestHandler):
                 wb = "active"                  # 又答错/遗忘 → 回到待重练
         db().execute("""UPDATE srs SET status=?,ease=?,interval=?,repetitions=?,lapses=?,due=?,
                         last_review=?, correct=correct+?, wrong=wrong+?, wb_status=?, wb_streak=?,
-                        last_choice=COALESCE(?,last_choice)
+                        last_choice=COALESCE(?,last_choice), step=?
                         WHERE qid=? AND user_id=?""",
                      (new["status"], new["ease"], new["interval"], new["repetitions"], new["lapses"],
-                      new["due"], now(), correct, 0 if correct else 1, wb, streak, choice, eqid, uid))
+                      new["due"], now(), correct, 0 if correct else 1, wb, streak, choice,
+                      new.get("step") or 0, eqid, uid))
         db().execute("""INSERT INTO reviews(qid,user_id,grade,ts,interval_before,interval_after,ease,timeout,prev_json)
                         VALUES(?,?,?,?,?,?,?,?,?)""",
                      (eqid, uid, grade, now(), before, new["interval"], new["ease"],
@@ -1523,14 +1614,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(400, {"error": "评分快照已损坏，无法撤销"})
             db().execute("""UPDATE srs SET status=?,ease=?,interval=?,repetitions=?,lapses=?,due=?,
-                            last_review=?,correct=?,wrong=?,wb_status=?,wb_streak=?,last_choice=?
+                            last_review=?,correct=?,wrong=?,wb_status=?,wb_streak=?,last_choice=?,
+                            step=?
                             WHERE qid=? AND user_id=?""",
                          (prev.get("status") or "new", prev.get("ease") or 2.5,
                           prev.get("interval") or 0, prev.get("repetitions") or 0,
                           prev.get("lapses") or 0, prev.get("due"), prev.get("last_review"),
                           prev.get("correct") or 0, prev.get("wrong") or 0,
                           prev.get("wb_status") or "active", prev.get("wb_streak") or 0,
-                          prev.get("last_choice"), row["qid"], uid))
+                          prev.get("last_choice"), prev.get("step") or 0,
+                          row["qid"], uid))
             db().execute("DELETE FROM reviews WHERE id=?", (row["id"],))
             db().commit()
         return self._send(200, {"ok": True, "qid": row["qid"], "grade": row["grade"],
@@ -1572,6 +1665,18 @@ class Handler(BaseHTTPRequestHandler):
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('daily_goal',?)", (str(v),))
             db().commit()
         return self._send(200, {"ok": True, "goal": v})
+
+    def api_limits(self, p):
+        """保存每日新题 / 复习上限。0 = 不限量（老用户想回到「刷到爽」也可以）。"""
+        out = {}
+        with _LOCK:
+            for key, hi in (("daily_new", 300), ("daily_review", 2000)):
+                if key in p:
+                    v = max(0, min(hi, _int(p.get(key), 0)))
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(v)))
+                    out[key] = v
+            db().commit()
+        return self._send(200, {"ok": True, **out})
 
     def api_doubt(self, p):
         eqid = resolve_qid(int(p.get("id", 0)))
