@@ -1285,14 +1285,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/doubts":
             page = max(1, _int(g("page"), 1)); size = max(1, min(50, _int(g("size"), 20)))
             only = g("only")  # pending
-            cond = "q.doubt!=''"; args = []
+            # 必须按当前账号过滤：doubt_status 的主键是 (qid,user_id)，
+            # 少了 user_id 条件时，别人标的「已复核」会改变你的列表，同一题被多人标记还会产生重复行。
+            uid = need_uid(g("token"))
+            cond = "q.doubt!=''"; args = [uid]
             if only == "pending":
                 cond += " AND (ds.status IS NULL OR ds.status='')"
-            total = q_one(f"""SELECT COUNT(*) n FROM qdb.questions q LEFT JOIN doubt_status ds ON ds.qid=q.qid
+            total = q_one(f"""SELECT COUNT(*) n FROM qdb.questions q
+                             LEFT JOIN doubt_status ds ON ds.qid=q.qid AND ds.user_id=?
                              WHERE {cond}""", args)["n"]
             rows = q_all(f"""SELECT q.id,q.qid,q.module,q.category,q.kadian,q.region,q.year,q.doubt,
                             ds.status ds_status, ds.note ds_note
-                            FROM qdb.questions q LEFT JOIN doubt_status ds ON ds.qid=q.qid
+                            FROM qdb.questions q
+                            LEFT JOIN doubt_status ds ON ds.qid=q.qid AND ds.user_id=?
                             WHERE {cond} ORDER BY q.module,q.category LIMIT ? OFFSET ?""",
                          args + [size, (page - 1) * size])
             return self._send(200, {"total": total, "page": page, "size": size, "rows": rows})
@@ -1650,6 +1655,28 @@ class Handler(BaseHTTPRequestHandler):
             db().commit()
         return self._send(200, self._issue(uid))
 
+    def _is_local_request(self):
+        """请求是否来自部署本服务的这台机器（直连，未经过反向代理）。
+        用于「老账号首次设密」这类没有密码可验的场景：只允许在主机本地完成，
+        否则任何知道用户名的人都能远程接管无密码账号。"""
+        if (self.headers.get("X-Forwarded-For") or "").strip():
+            return False   # 经过代理后来源不可信，不能再按回环地址放行
+        ip = (self.client_address[0] or "").strip()
+        return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _legacy_claim_error(self, row, legacy_id):
+        """老账号补设密码的准入判定。返回 None 表示允许，否则返回错误文案。
+        规则：账号必须尚无密码；携带本机账号标识时必须匹配；
+        没带标识时只允许主机本地请求（本机用户自己升级老账号）。"""
+        if row["pw_hash"]:
+            return "该账号已设置密码，请直接登录"
+        lid = (legacy_id or "").strip()
+        if lid:
+            return None if lid == row["id"] else "账号标识不匹配"
+        if self._is_local_request():
+            return None
+        return "为保护账号安全，无密码的老账号只能在部署本服务的机器上完成首次设密"
+
     def api_auth_password(self, p):
         """修改密码（需已登录）；也用于老账号首次补设密码。"""
         uid = auth_uid(p.get("token"))
@@ -1658,11 +1685,15 @@ class Handler(BaseHTTPRequestHandler):
         if len(newpw) < 6:
             return self._send(400, {"error": "新密码至少 6 位"})
         if not uid:
-            # 未登录 → 走老账号补设：凭用户名 + 该账号当前无密码
+            # 未登录 → 走老账号补设：凭用户名 + 该账号当前无密码。
+            # 必须做归属校验，否则等于「知道用户名就能改掉别人的密码」。
             username = (p.get("username") or "").strip()
             r = q_one("SELECT * FROM users WHERE username=?", (username,))
-            if not r or r["pw_hash"]:
+            if not r:
                 return self._send(401, {"error": "请重新登录后再修改密码"})
+            err = self._legacy_claim_error(r, p.get("legacy_id"))
+            if err:
+                return self._send(403, {"error": err})
             uid = r["id"]
         else:
             r = q_one("SELECT * FROM users WHERE id=?", (uid,))
@@ -1683,11 +1714,10 @@ class Handler(BaseHTTPRequestHandler):
         r = q_one("SELECT * FROM users WHERE username=?", (username,))
         if not r:
             return self._send(400, {"error": "账号不存在"})
-        if r["pw_hash"]:
-            return self._send(400, {"error": "该账号已设置密码，请直接登录"})
-        # 必须携带本机此前保存的账号标识，避免陌生人抢注他人老账号
-        if legacy_id and legacy_id != r["id"]:
-            return self._send(400, {"error": "账号标识不匹配"})
+        # 以前这里只在「带了 legacy_id 且不匹配」时拒绝，传空即通过 —— 等于没有校验。
+        err = self._legacy_claim_error(r, legacy_id)
+        if err:
+            return self._send(403, {"error": err})
         with _LOCK:
             db().execute("UPDATE users SET pw_hash=? WHERE id=?", (pw_hash(pw), r["id"]))
             db().commit()

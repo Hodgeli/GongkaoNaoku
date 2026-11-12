@@ -231,9 +231,10 @@ function route() {
 window.addEventListener('hashchange', () => { nav(); });
 
 /* ---------- side stats ---------- */
-async function refreshSide() {
+/* pre：调用方已经拿到的 /api/stats 结果，直接复用，避免同一屏请求两次 */
+async function refreshSide(pre) {
   try {
-    const s = await API('/api/stats');
+    const s = pre || await API('/api/stats');
     document.getElementById('side-stats').innerHTML = `
       <div class="stat-chip"><span>待复习</span><b style="color:var(--warn)">${s.due_review}</b></div>
       <div class="stat-chip"><span>未学新题</span><b style="color:var(--brand)">${s.new}</b></div>
@@ -393,7 +394,7 @@ function optionBusyEnd() {
 async function viewDashboard() {
   loading();
   const s = await API('/api/stats');
-  await refreshSide();
+  await refreshSide(s);   // 复用上面这次结果，不再重复请求 /api/stats
   const resumeBtn = (() => {
     try {
       const o = loadSession();
@@ -663,13 +664,15 @@ function renderAct() {
         ${f.verified.source_url ? `<p class="vsrc">来源：<a href="${esc(f.verified.source_url)}" target="_blank" rel="noopener">${esc(f.verified.source_name || '查看来源')}</a></p>` : ''}
       </div>` : ''}
     </div>
+    <div id="grade-zone">
     <div class="grade">
       <button class="g-again" data-g="1">忘记<small>again · 马上重来</small></button>
       <button class="g-hard" data-g="3">困难<small>hard</small></button>
       <button class="g-good" data-g="4">一般<small>good · 记住了</small></button>
       <button class="g-easy" data-g="5">熟悉<small>easy · 轻松</small></button>
     </div>
-    <p class="sub" style="margin-top:10px">按你的真实记忆强度自评（键盘 1/2/3/4 亦可）。系统将据此计算下次复习间隔。</p>`;
+    <p class="sub" style="margin-top:10px">按你的真实记忆强度自评（键盘 1/2/3/4 亦可）。系统将据此计算下次复习间隔。</p>
+    </div>`;
   act.querySelectorAll('.grade button').forEach(b => b.onclick = () => doGrade(+b.dataset.g));
   document.getElementById('t-fav').onclick = async (e) => {
     const btn = e.currentTarget;
@@ -808,13 +811,18 @@ function renderNextBar() {
   /* 立即切题：不留操作条，评分落地后直接进下一题（解析在评分前就已经看过） */
   if (auto < 0) { clearNextBar(); nextCard(); return; }
   const last = S.idx >= S.queue.length - 1;
-  box.innerHTML = `<div class="grade nextbar">
+  const html = `<div class="grade nextbar">
     <span class="nx-tip" id="nx-tip">已记录 · 看完解析再继续</span>
     <button class="btn ok nx-go">${last ? '完成本组 →' : '下一题 →'} <small>空格</small></button>
   </div>`;
+  /* 只替换评分区。此前整块覆写 #act，会把答案行、解析、笔记一起清掉 ——
+     「不自动」模式下评完就看不到解析了，与设计说明 §9.2 的描述不符。 */
+  const zone = document.getElementById('grade-zone');
+  const host = zone || box;              // 兜底：超时等路径可能已重建 #act
+  host.innerHTML = html;
   document.documentElement.setAttribute('data-nextbar', '1');
-  box.querySelector('.nx-go').onclick = nextCard;
-  box.querySelector('.nx-go').focus({ preventScroll: true });
+  host.querySelector('.nx-go').onclick = nextCard;
+  host.querySelector('.nx-go').focus({ preventScroll: true });
   if (NX_TIMER) { clearInterval(NX_TIMER); NX_TIMER = null; }
   if (auto) {
     let left = auto;
@@ -1856,10 +1864,12 @@ function showSetPassword(username) {
     <label class="fld" style="display:block;margin-bottom:8px">用户名<input id="sp-user" size="20" value="${esc(username)}"></label>
     <label class="fld" style="display:block;margin-bottom:8px">新密码（至少 6 位）<input id="sp-pw" type="password" size="20" autocomplete="new-password"></label>
     <button class="btn ok" id="sp-go" style="width:100%">设置密码并进入</button>
-    <p class="sub" style="margin:12px 0 0;font-size:12px">⚠️ 请尽快完成设置，在此之前任何知道你用户名的人都可能占用该账号。</p>
+    <button class="btn ghost" id="sp-cancel" style="width:100%;margin-top:8px">返回登录</button>
+    <p class="sub" style="margin:12px 0 0;font-size:12px">⚠️ 无密码的老账号只能在本机完成首次设密；若提示无法设置，请在部署服务的电脑上操作，或改用其他账号。</p>
   </div>`;
   document.body.appendChild(box);
   const $ = id => box.querySelector('#' + id);
+  $('sp-cancel').onclick = () => { box.remove(); showLogin(''); };
   const submit = async () => {
     const username2 = $('sp-user').value.trim();
     const password = $('sp-pw').value;
