@@ -1,0 +1,48 @@
+# ============================================================
+# 换行符统一
+#   - 文本一律入库为 LF，避免 Windows / Linux 互相提交时全文件 diff
+#   - .bat / .cmd / LICENSE 不做任何转换（保持字节原样）：
+#     .bat 一旦被改成 LF，cmd.exe 会在多行 if 块处解析崩溃（历史坑，见设计说明 §12-1）
+# ============================================================
+* text=auto eol=lf
+
+*.bat  -text
+*.cmd  -text
+*.ps1  -text
+LICENSE -text
+
+*.py   text eol=lf
+*.sh   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+
+# ============================================================
+# 二进制：禁止换行转换、禁止文本 diff
+#   kaogong.db.part-* 是 30MB 分卷，若被当成文本处理会损坏
+# ============================================================
+*.db        binary
+*.db.part-* binary
+*.sqlite    binary
+*.sqlite3   binary
+*.zip       binary
+*.gz        binary
+*.7z        binary
+
+*.webp binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.bmp  binary
+
+# ============================================================
+# GitHub 语言统计：题库配图与分卷不计入仓库语言占比
+# ============================================================
+90-图片/**        linguist-vendored
+kaogong.db.part-* linguist-vendored
+docs/**           linguist-documentation

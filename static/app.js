@@ -523,7 +523,7 @@ async function viewDashboard() {
       <span style="display:block;height:100%;width:${(mastery[k] || 0) / maxM * 100}%;background:linear-gradient(90deg,var(--brand),var(--purple));border-radius:9px"></span></span></span>
     </div>`).join('')}
   </div>
-  <div class="footer">SM-2 间隔重复 · 忘记/困难/一般/熟悉 四档自评 · 图片全程离线</div>`;
+  <div class="footer">FSRS-5 间隔重复 · 忘记/困难/一般/熟悉 四档自评 · 图片全程离线</div>`;
 }
 
 /* ---------- study setup ---------- */

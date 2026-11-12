@@ -30,6 +30,9 @@
   --warn:         oklch(62% 0.105 72);
   --bad:          oklch(51% 0.145 27);
   --purple:       oklch(50% 0.095 300);
+  /* 选项对/错底色：必须随主题走，写死浅色会在暗色主题下变成浅底浅字 */
+  --ok-bg:        oklch(96% 0.028 152);
+  --bad-bg:       oklch(96% 0.030 27);
 
   /* 排版：模块化 1.25，rem 单位尊重浏览器字号设置 */
   --font-sans: "PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
@@ -85,6 +88,8 @@ html[data-theme="dark"]{
   --warn:      oklch(80% 0.090 78);
   --bad:       oklch(70% 0.105 27);
   --purple:    oklch(76% 0.075 300);
+  --ok-bg:     oklch(27% 0.048 152);
+  --bad-bg:    oklch(27% 0.055 27);
   --leading:   1.8;          /* 浅字深底：行高再加一点 */
   --shadow:0 1px 2px rgba(0,0,0,.35);
   --shadow-lift:0 2px 6px rgba(0,0,0,.40), 0 12px 28px -14px rgba(0,0,0,.55);
@@ -235,8 +240,8 @@ html[data-theme="dark"] img{background:oklch(28% 0.010 80)}
 .opt:hover{background:var(--surface-2);border-color:var(--rule-2)}
 .opt .k{font-family:var(--font-serif);font-weight:700;color:var(--brand);min-width:20px;font-size:1rem}
 .opt .body{flex:1}
-.opt.correct{border-color:var(--ok);border-left-color:var(--ok);background:oklch(96% 0.028 152)}
-.opt.wrong{border-color:var(--bad);border-left-color:var(--bad);background:oklch(96% 0.030 27)}
+.opt.correct{border-color:var(--ok);border-left-color:var(--ok);background:var(--ok-bg)}
+.opt.wrong{border-color:var(--bad);border-left-color:var(--bad);background:var(--bad-bg)}
 .opt.show-ans{border-left-color:var(--ok)}
 .opt.sel{border-color:var(--brand);border-left-color:var(--brand);background:var(--surface-2)}
 
@@ -309,6 +314,7 @@ html[data-theme="dark"] img{background:oklch(28% 0.010 80)}
   background:var(--surface);cursor:pointer;font-weight:600;font-size:13px;color:var(--ink-3);
   transition:.16s var(--ease);font-variant-numeric:tabular-nums}
 .exam-dot.answered{background:oklch(94% 0.020 253);border-color:var(--brand);color:var(--brand)}
+html[data-theme="dark"] .exam-dot.answered{background:oklch(28% 0.032 253)}
 .exam-dot.cur{outline:2px solid var(--accent);outline-offset:1px}
 .exam-q{margin-bottom:var(--s2)}
 .exam-result{text-align:center;padding:var(--s8) var(--s5)}
