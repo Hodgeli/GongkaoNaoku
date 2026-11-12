@@ -242,6 +242,7 @@ function route() {
   if (h === '#/favorites') return viewFavorites();
   if (h === '#/exam') return viewExam();
   if (h === '#/materials') return viewMaterials();
+  if (h === '#/search') return viewSearch();
   if (h === '#/doubts') return viewDoubts();
   if (h === '#/stats') return viewStats();
   if (h === '#/settings') return viewSettings();
@@ -1481,6 +1482,113 @@ async function openMaterial(i) {
 function startMaterial(mid, p) {
   startSession({ mode: 'material', mid, region: p.region, year: p.year,
     size: String(Math.min(12, p.n || 5)) });
+}
+
+/* ---------- search ---------- */
+/* 全文检索：≥3 字符走 FTS5 trigram（毫秒级），更短的词后端退回 LIKE 逐行匹配。
+   结果片段由后端做好 HTML 转义 + <mark> 高亮，前端直接插入，不要再 esc 一遍。 */
+let SEARCH_FACETS = null;
+
+function viewSearch() {
+  const p0 = new URLSearchParams(location.hash.split('?')[1] || '');
+  const f = {
+    q: p0.get('q') || '', module: p0.get('module') || '',
+    region: p0.get('region') || '', year: p0.get('year') || '',
+    page: Math.max(1, +p0.get('page') || 1),
+  };
+  app.innerHTML = `
+  <h1>全文搜索</h1><p class="sub">搜题干、解析、考点与分类。多个关键词用空格分开，全部命中才算。</p>
+  <div class="card" style="margin-bottom:var(--s4)">
+    <div class="row" style="margin-bottom:12px">
+      <input id="s-q" placeholder="例如：基尼系数 / 比重变化 / 逻辑填空" value="${esc(f.q)}" style="flex:1;min-width:240px;font-size:15px">
+      <button class="btn" id="s-go">搜索</button>
+    </div>
+    <div class="filters" style="margin-bottom:0">
+      <label class="fld">模块<select id="s-mod"><option value="">全部</option>
+        ${BOOT.modules.map(m => `<option value="${esc(m.module)}"${m.module === f.module ? ' selected' : ''}>${esc(m.module)} (${m.n})</option>`).join('')}</select></label>
+      <label class="fld">地区<select id="s-reg"><option value="">全部</option></select></label>
+      <label class="fld">年份<select id="s-yr"><option value="">全部</option></select></label>
+    </div>
+  </div>
+  <div id="s-res"></div>`;
+
+  const go = (page) => {
+    const q = new URLSearchParams();
+    const v = document.getElementById('s-q').value.trim();
+    if (v) q.set('q', v);
+    const m = document.getElementById('s-mod').value; if (m) q.set('module', m);
+    const r = document.getElementById('s-reg').value; if (r) q.set('region', r);
+    const y = document.getElementById('s-yr').value; if (y) q.set('year', y);
+    if (page > 1) q.set('page', String(page));
+    const target = '#/search' + (q.toString() ? '?' + q.toString() : '');
+    // 条件没变时 hashchange 不触发，得手动刷一次，否则「再点一次搜索」毫无反应
+    if (location.hash === target) loadSearch({ q: v, module: m, region: r, year: y, page });
+    else location.hash = target;
+  };
+  document.getElementById('s-go').onclick = () => go(1);
+  document.getElementById('s-q').onkeydown = e => { if (e.key === 'Enter') go(1); };
+  ['s-mod', 's-reg', 's-yr'].forEach(id => document.getElementById(id).onchange = () => go(1));
+
+  // 地区/年份选项由 /api/search 顺带返回（题库全量 facet，后端缓存一次）。
+  // 不能用 /api/accuracy —— 那是按本人答题历史算的，新账号全空。
+  if (SEARCH_FACETS) fillSearchFacets(f);
+  loadSearch(f);
+}
+
+function fillSearchFacets(f) {
+  const R = document.getElementById('s-reg'), Y = document.getElementById('s-yr');
+  if (!R || !Y || !SEARCH_FACETS) return;
+  const opt = (x, cur) => `<option value="${esc(x.k)}"${x.k === cur ? ' selected' : ''}>${esc(x.k)} (${x.n})</option>`;
+  R.innerHTML = '<option value="">全部</option>' + SEARCH_FACETS.region.map(x => opt(x, f.region)).join('');
+  Y.innerHTML = '<option value="">全部</option>' + SEARCH_FACETS.year.map(x => opt(x, f.year)).join('');
+}
+
+async function loadSearch(f) {
+  const box = document.getElementById('s-res'); if (!box) return;
+  if (!f.q) {
+    box.innerHTML = `<div class="empty"><div class="big">🔍</div><h2>输入关键词开始搜索</h2>
+      <p class="sub">三个字以上走全文索引（毫秒级）；两个字也能搜，只是后端要逐行匹配，稍慢一点。</p></div>`;
+    // 空词也发一次，只为拿地区/年份 facet（返回体很小）
+    if (!SEARCH_FACETS) API('/api/search?size=1').then(d => {
+      if (d.facets) { SEARCH_FACETS = d.facets; fillSearchFacets(f); }
+    }).catch(() => { });
+    return;
+  }
+  box.innerHTML = `<div class="loading" style="padding:26px"><div class="spinner"></div><div class="loading-txt">搜索中…</div></div>`;
+  const p = new URLSearchParams({ q: f.q, page: String(f.page || 1), size: '20' });
+  if (f.module) p.set('module', f.module);
+  if (f.region) p.set('region', f.region);
+  if (f.year) p.set('year', f.year);
+  let d; try { d = await API('/api/search?' + p); }
+  catch (e) { box.innerHTML = `<div class="card">${esc(e.message || e)}</div>`; return; }
+  if (d.facets && !SEARCH_FACETS) { SEARCH_FACETS = d.facets; fillSearchFacets(f); }
+  if (!d.rows.length) {
+    box.innerHTML = `<div class="empty"><div class="big">🫥</div><h2>没有匹配的题</h2>
+      <p class="sub">换个说法试试，或者把筛选条件放宽。</p></div>`;
+    return;
+  }
+  const pages = Math.ceil(d.total / d.size);
+  box.innerHTML = `
+  <div class="sub" style="margin:0 0 var(--s3)">共 ${d.total.toLocaleString()} 条${pages > 1 ? ` · 第 ${d.page} / ${pages} 页` : ''}${d.mode === 'like' ? ' · 短词逐行匹配' : ''}</div>
+  ${d.rows.map(r => `<div class="card s-hit" onclick="location.hash='#/detail?id=${r.id}'">
+    <div class="row" style="gap:6px;margin-bottom:8px">
+      <span class="tag ${r.hit === '题干' ? 'review' : 'learning'}">命中${esc(r.hit)}</span>
+      <span class="tag">${esc(r.module || '')}${r.category ? '/' + esc(r.category) : ''}</span>
+      <span class="tag">${esc(r.region || '')} ${esc(r.year || '')}</span>
+      ${r.has_image ? '<span class="tag">含图</span>' : ''}
+    </div>
+    <div class="s-frag">${r.frag}</div>
+  </div>`).join('')}
+  ${pages > 1 ? `<div class="row" style="justify-content:center;margin-top:var(--s5)">
+    <button class="btn ghost" ${d.page <= 1 ? 'disabled' : ''} onclick="searchPage(${d.page - 1})">← 上一页</button>
+    <button class="btn ghost" ${d.page >= pages ? 'disabled' : ''} onclick="searchPage(${d.page + 1})">下一页 →</button>
+  </div>` : ''}`;
+}
+
+function searchPage(n) {
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  if (n > 1) q.set('page', String(n)); else q.delete('page');
+  location.hash = '#/search?' + q.toString();
 }
 
 /* ---------- doubts ---------- */

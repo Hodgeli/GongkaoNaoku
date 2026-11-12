@@ -2,7 +2,8 @@
 """合并分卷题库：kaogong.db.part-00..NN -> kaogong.db（克隆后运行一次即可）
 
 合并完成后会自动套用 data/fixups.json 里的逐题修正补丁（见 fixups.py），
-并把材料归并成独立的 materials 表（见 materials.py）。
+把材料归并成独立的 materials 表（见 materials.py），
+最后重建全文索引（见 search.py）。
 """
 import glob, os, shutil, sys
 
@@ -33,5 +34,12 @@ try:
     materials.build(out)
 except Exception as e:
     print(f"[WARN] 材料表构建失败：{e}")
+
+# 全文索引（必须最后跑：fixups 改过题干/解析，索引要基于最终内容重建）
+try:
+    import search
+    search.build(out)
+except Exception as e:
+    print(f"[WARN] 全文索引构建失败：{e}")
 
 print("现在可以运行 python3 server.py")

@@ -377,6 +377,14 @@ html[data-theme="dark"] .exam-dot.answered{background:oklch(28% 0.032 253)}
 .acc-row .pct{min-width:84px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
 .chipset{display:flex;gap:var(--s2);flex-wrap:wrap;margin-bottom:var(--s4)}
 
+/* ===== 全文搜索 ===== */
+/* 命中片段由后端拼好 HTML（已转义，只含 <mark>），前端直接插入 */
+.s-hit{cursor:pointer;transition:.18s var(--ease)}
+.s-hit:hover{border-color:var(--brand);box-shadow:var(--shadow-lift)}
+.s-hit .s-frag{font-size:14.5px;line-height:1.85;color:var(--ink-2);word-break:break-word}
+.s-hit .s-frag mark{background:color-mix(in oklch, var(--warn) 45%, transparent);
+  color:var(--ink);border-radius:3px;padding:0 2px;font-weight:600}
+
 /* ===== 专注模式 ===== */
 html[data-focus="1"] #sidebar{display:none}
 html[data-focus="1"] #app{max-width:760px;margin:0 auto}
@@ -388,6 +396,12 @@ html[data-focus="1"] .focus-exit:hover{color:var(--ink);border-color:var(--brand
 
 /* ===== 账号区 ===== */
 .top-actions{display:flex;gap:var(--s2);align-items:center}
+/* 桌面侧栏只有 236px：账号按钮 + 主题按钮并排会把标题挤到 48px（折成 5 行）。
+   标题独占一行，按钮挪到下一行右对齐；平板/手机是横排布局，不受影响。 */
+@media(min-width:821px){
+  .brand-row{flex-direction:column;align-items:stretch;gap:10px}
+  .top-actions{justify-content:flex-end}
+}
 .user-chip{cursor:pointer;background:var(--surface);border:1px solid var(--rule);color:var(--ink);
   border-radius:var(--radius-pill);padding:6px 12px;font-size:13px;font-weight:600;max-width:140px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:.16s var(--ease)}

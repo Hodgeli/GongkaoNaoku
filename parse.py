@@ -320,6 +320,12 @@ def main():
         materials.build(DB_PATH)
     except Exception as e:
         print("[WARN] 材料表构建失败：%s" % e)
+    # 全文索引（最后跑）
+    try:
+        import search
+        search.build(DB_PATH)
+    except Exception as e:
+        print("[WARN] 全文索引构建失败：%s" % e)
     print("[FILE] 数据库(纯题库):", DB_PATH)
 
 if __name__ == "__main__":

@@ -707,6 +707,84 @@ def plain_text(html, n=None):
     return s[:n] if n else s
 
 
+# ---------- 全文检索 ----------
+FTS_MIN = 3          # trigram 分词器最少 3 个字符，短于此退回 LIKE
+
+_HTML_ESC = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&quot;"))
+
+
+def esc_html(s):
+    for a, b in _HTML_ESC:
+        s = (s or "").replace(a, b)
+    return s
+
+
+def fts_expr(kw):
+    """把用户输入转成 FTS5 短语表达式。
+
+    每个词用双引号包成短语（引号自身转义成两个），既保证「连续出现」的语义，
+    也顺手挡掉 `AND/OR/NOT/*/-` 这些 FTS5 语法 —— 用户输个 `a-b` 不该 500。
+    全部词都短于 3 字符时返回 None，调用方退回 LIKE。
+    """
+    parts = [p for p in re.split(r"\s+", (kw or "").strip()) if len(p) >= FTS_MIN]
+    if not parts:
+        return None
+    return " AND ".join('"%s"' % p.replace('"', '""') for p in parts)
+
+
+def highlight(text, kws, width=70):
+    """纯文本里定位关键词，截取前后片段并把命中处包成 `<mark>`。
+
+    不用 FTS5 自带的 snippet()：trigram 按 3 字符切 token，snippet 会把中文从中间
+    截断（「基尼系」+「数」）。这里按字符定位，中文不会断。
+    """
+    plain = plain_text(text)
+    if not plain:
+        return ""
+    low = plain.lower()
+    pos, hit = -1, ""
+    for k in kws:
+        p = low.find(k.lower())
+        if p >= 0 and (pos < 0 or p < pos):
+            pos, hit = p, k
+    if pos < 0:
+        cut = plain[:width * 2]
+        return esc_html(cut) + ("…" if len(plain) > len(cut) else "")
+    a = max(0, pos - width // 2)
+    b = min(len(plain), pos + len(hit) + width)
+    frag = plain[a:b]
+    out, i, ll, hl = [], 0, frag.lower(), hit.lower()
+    while True:
+        j = ll.find(hl, i)
+        if j < 0:
+            out.append(esc_html(frag[i:]))
+            break
+        out.append(esc_html(frag[i:j]))
+        out.append("<mark>" + esc_html(frag[j:j + len(hit)]) + "</mark>")
+        i = j + len(hit)
+    return ("…" if a > 0 else "") + "".join(out) + ("…" if b < len(plain) else "")
+
+
+_FACETS = None
+
+
+def corpus_facets():
+    """搜索页「地区 / 年份」下拉的选项，取自题库全量，进程内缓存一次。
+
+    不能用 /api/accuracy：那是按本人答题历史算的正确率维度，新账号全空，
+    下拉会只剩「全部」。题库是只读的，缓存到进程结束也不会脏。
+    """
+    global _FACETS
+    if _FACETS is None:
+        _FACETS = {
+            "region": q_all("SELECT region k, COUNT(*) n FROM qdb.questions "
+                            "WHERE IFNULL(region,'')<>'' GROUP BY region ORDER BY n DESC"),
+            "year": q_all("SELECT year k, COUNT(*) n FROM qdb.questions "
+                          "WHERE IFNULL(year,'')<>'' GROUP BY year ORDER BY k DESC"),
+        }
+    return _FACETS
+
+
 def build_where(module, category, kadian, region=None, year=None, paper=None):
     cond, args = [], []
     if module:
@@ -1594,6 +1672,78 @@ class Handler(BaseHTTPRequestHandler):
                 srs["leech"] = fsrs.is_leech(srs.get("lapses"))
             return self._send(200, {"card": clean_card(r, reveal=True, uid=uid), "srs": srs})
 
+        if path == "/api/search":
+            # 全文检索：题干 / 解析 / 考点 / 分类。
+            # ≥3 字符走 FTS5 trigram（毫秒级），更短的词退回 LIKE 全表扫（27k 行约 100~300ms）
+            # —— trigram 最少要 3 个字符才能切出一个 token，「比重」这种两字查询它接不住。
+            need_uid(g("token"))
+            kw = (g("q") or "").strip()[:60]
+            page = max(1, _int(g("page"), 1))
+            size = max(1, min(50, _int(g("size"), 20)))
+            cond, args = build_where(g("module"), g("category"), g("kadian"),
+                                     g("region"), g("year"))
+            if not kw:
+                return self._send(200, {"total": 0, "page": page, "size": size,
+                                        "rows": [], "mode": "empty", "q": "",
+                                        "facets": corpus_facets()})
+            kws = [p for p in re.split(r"\s+", kw) if p]
+            expr = fts_expr(kw)
+            rows, mode = [], "like"
+            if expr:
+                try:
+                    total = q_one(f"""SELECT COUNT(*) n FROM qdb.questions_fts f
+                                      JOIN qdb.questions q ON q.id=f.rowid
+                                      WHERE f.questions_fts MATCH ?{cond}""",
+                                  (expr, *args))["n"]
+                    rows = q_all(f"""SELECT q.id, q.qid, q.module, q.category, q.region,
+                                            q.year, q.kadian, q.answer, q.has_image,
+                                            q.stem, q.analysis
+                                     FROM qdb.questions_fts f
+                                     JOIN qdb.questions q ON q.id=f.rowid
+                                     WHERE f.questions_fts MATCH ?{cond}
+                                     ORDER BY f.rank LIMIT ? OFFSET ?""",
+                                 (expr, *args, size, (page - 1) * size))
+                    mode = "fts"
+                except Exception as e:
+                    # 索引缺失 / 表达式不被接受 → 下面统一走 LIKE，不让搜索整个坏掉
+                    print("[WARN] FTS 查询失败，退回 LIKE：", e)
+                    rows = []
+            if mode == "like":
+                like = []
+                for k in kws:
+                    like += ["%" + k + "%"] * 3
+                w = " AND ".join("(q.stem LIKE ? OR q.analysis LIKE ? OR q.kadian LIKE ?)"
+                                 for _ in kws)
+                cond2 = cond + " AND " + w
+                total = q_one(f"SELECT COUNT(*) n FROM qdb.questions q WHERE 1=1{cond2}",
+                              (*args, *like))["n"]
+                rows = q_all(f"""SELECT q.id, q.qid, q.module, q.category, q.region,
+                                        q.year, q.kadian, q.answer, q.has_image,
+                                        q.stem, q.analysis
+                                 FROM qdb.questions q WHERE 1=1{cond2}
+                                 ORDER BY q.id LIMIT ? OFFSET ?""",
+                             (*args, *like, size, (page - 1) * size))
+            out = []
+            for r in rows:
+                # 命中位置优先报「题干」，其次「解析」，最后「考点」—— 用户最想看到的是题干
+                frag, hit = highlight(r["stem"], kws), "题干"
+                if "<mark>" not in frag:
+                    f2 = highlight(r["analysis"], kws)
+                    if "<mark>" in f2:
+                        frag, hit = f2, "解析"
+                    else:
+                        f3 = highlight(r["kadian"] or "", kws)
+                        if "<mark>" in f3:
+                            frag, hit = f3, "考点"
+                out.append({"id": r["id"], "qid": r["qid"], "module": r["module"],
+                            "category": r["category"], "region": r["region"],
+                            "year": r["year"], "kadian": r["kadian"],
+                            "answer": r["answer"], "has_image": bool(r["has_image"]),
+                            "hit": hit, "frag": frag})
+            return self._send(200, {"total": total, "page": page, "size": size,
+                                    "rows": out, "mode": mode, "q": kw,
+                                    "facets": corpus_facets()})
+
         if path == "/api/browse":
             page = max(1, _int(g("page"), 1)); size = max(1, min(100, _int(g("size"), 25)))
             uid = need_uid(g("token"))
@@ -2476,6 +2626,22 @@ def ensure_materials():
         print("[WARN] 材料表初始化失败（不影响其他功能）：", e)
 
 
+def ensure_search():
+    """题库升级兜底：没有全文索引就建一次（约 7 秒，只在第一次启动时花）。
+
+    失败不影响其他功能 —— `/api/search` 会退回 LIKE 全表扫描，慢但能搜到。
+    """
+    try:
+        have = q_one("SELECT 1 ok FROM qdb.sqlite_master WHERE type='table' "
+                     "AND name='questions_fts'")
+        if have:
+            return
+        import search as search_mod
+        search_mod.build(DB_PATH)
+    except Exception as e:
+        print("[WARN] 全文索引构建失败（搜索将退回 LIKE）：", e)
+
+
 def main():
     if not os.path.exists(DB_PATH):
         print("[ERR] 数据库不存在，请先运行: python parse.py")
@@ -2486,6 +2652,7 @@ def main():
         ensure_tables()
         q_one("SELECT COUNT(*) n FROM qdb.questions")   # 兜底：ATTACH 缺文件会静默建空库
         ensure_materials()   # 材料独立成表（老库自动补建，幂等）
+        ensure_search()      # 全文索引（老库自动补建；失败则搜索退回 LIKE）
         # 自定义 FSRS 参数（settings.fsrs_w 存 19 个浮点的 JSON 数组），没配就用官方默认
         try:
             wj = get_setting("fsrs_w")
