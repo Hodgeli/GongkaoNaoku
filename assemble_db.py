@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""合并分卷题库：kaogong.db.part-00..NN -> kaogong.db（克隆后运行一次即可）"""
+"""合并分卷题库：kaogong.db.part-00..NN -> kaogong.db（克隆后运行一次即可）
+
+合并完成后会自动套用 data/fixups.json 里的逐题修正补丁（见 fixups.py）。
+"""
 import glob, os, shutil, sys
+
 here = os.path.dirname(os.path.abspath(__file__))
 parts = sorted(glob.glob(os.path.join(here, "kaogong.db.part-*")))
 if not parts:
@@ -10,4 +14,16 @@ with open(out, "wb") as f:
     for p in parts:
         with open(p, "rb") as g:
             shutil.copyfileobj(g, f, 1024*1024*8)
-print(f"已生成 {out}（{os.path.getsize(out)//1048576} MB，来自 {len(parts)} 个分卷）。现在可以运行 python3 server.py")
+print(f"已生成 {out}（{os.path.getsize(out)//1048576} MB，来自 {len(parts)} 个分卷）。")
+
+# 套用数据修正补丁（幂等；失败不影响主流程，但要让人看见）
+sys.path.insert(0, here)
+try:
+    import fixups
+    n = fixups.apply(out)
+    if n:
+        print(f"已应用题库修正补丁 {n} 行（data/fixups.json）。")
+except Exception as e:
+    print(f"[WARN] 题库修正补丁未应用：{e}")
+
+print("现在可以运行 python3 server.py")

@@ -1,0 +1,167 @@
+{
+ "_说明": [
+  "题库数据修正补丁：kaogong.db 是构建产物（由 kaogong.db.part-* 合并），不进版本库，",
+  "所以逐题修正以本文件形式随仓库分发，由 assemble_db.py 合并后自动应用、parse.py 导入后自动应用。",
+  "每条按 qid 定位，只更新列出的列；可重复执行（幂等）。",
+  "v1.8.1：13 道资料分析补回「给定材料」（材料为图表图片，取自上游 ERRRC/xingcezhenti），",
+  "        5 道判断题补 A.正确/B.错误 选项，答案取自库内官方解析结尾（『故表述错误』）。"
+ ],
+ "rows": [
+  {
+   "qid": "2033798",
+   "material": "<p><img width=\"696px\" height=\"289px\" src=\"/90-图片/题目图/166bfd03711b50b.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/166bfd03711b50b.webp,/90-图片/公式图/formula-111bc356d2b01317.webp,/90-图片/公式图/formula-898e379b7dc31ef8.webp,/90-图片/公式图/formula-68372bd2fa8792c3.webp,/90-图片/公式图/formula-d140e819e91aac83.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"2014年前7个月，中国对日本的贸易总额比对韩国的少\", \"html\": \"2014年前7个月，中国对日本的贸易总额比对韩国的少\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"2015年前7个月，中国对主要贸易伙伴的贸易顺差同比均有所增长\", \"html\": \"2015年前7个月，中国对主要贸易伙伴的贸易顺差同比均有所增长\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2015年前7个月，中国对其出口额超过5000亿元的主要贸易伙伴数是4\", \"html\": \"2015年前7个月，中国对其出口额超过5000亿元的主要贸易伙伴数是4\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"2015年前7个月，中国对其进口额和出口额同比变动方向一致的主要贸易伙伴数不足一半\", \"html\": \"2015年前7个月，中国对其进口额和出口额同比变动方向一致的主要贸易伙伴数不足一半\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "2255823",
+   "material": "<p><img width=\"687px\" height=\"447px\" src=\"/90-图片/题目图/166b01976c88ce1.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/166b01976c88ce1.webp,/90-图片/公式图/formula-d81631c186f49c26.webp,/90-图片/公式图/formula-07abf8a6e86f8206.webp,/90-图片/公式图/formula-0918ea75a48be877.webp,/90-图片/公式图/formula-c2bef1a4bfc99577.webp,/90-图片/公式图/formula-cdfaedf024029ab4.webp,/90-图片/公式图/formula-92fc891ccb64e629.webp,/90-图片/公式图/formula-783f3cab013d4850.webp,/90-图片/公式图/formula-73e8db5198e967e2.webp\\,/90-图片/公式图/formula-8f61834c0c636317.webp\\,/90-图片/公式图/formula-270b2b9ca7e279a5.webp\\,/90-图片/公式图/formula-0871978d84e92a74.webp\\,/90-图片/公式图/formula-0937324a00553b50.webp\\",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"，每年的快递业务量比上年增长均超出\", \"html\": \"<p><img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-73e8db5198e967e2.webp\\\" />，每年的快递业务量比上年增长均超出<img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-8f61834c0c636317.webp\\\" /></p>\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"，快递业务量的年均增长率低于\", \"html\": \"<p><img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-270b2b9ca7e279a5.webp\\\" />，快递业务量的年均增长率低于<img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-0871978d84e92a74.webp\\\" /></p>\", \"is_answer\": true}, {\"key\": \"C\", \"label\": \"，年平均快递业务量约为86.4亿件\", \"html\": \"<p><img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-0937324a00553b50.webp\\\" />，年平均快递业务量约为86.4亿件</p>\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"2015年的快递业务量比2011年翻了四番以上\", \"html\": \"<p>2015年的快递业务量比2011年翻了四番以上</p>\", \"is_answer\": false}]",
+   "answer": "B",
+   "qtype": "single"
+  },
+  {
+   "qid": "2392885",
+   "material": "<p><img width=\"700px\" height=\"479px\" src=\"/90-图片/题目图/16b2ad5c54df15d.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/16b2ad5c54df15d.webp,/90-图片/公式图/formula-b0dd30232e787f0c.webp,/90-图片/公式图/formula-4a42a0632d2a4f3a.webp,/90-图片/公式图/formula-8244d3923ccc50f6.webp,/90-图片/公式图/formula-f74801b8674b37ff.webp,/90-图片/公式图/formula-d416b4d5ecd1540f.webp,/90-图片/公式图/formula-06ffe2985447f65e.webp,/90-图片/公式图/formula-5673333f4d3c3acd.webp,/90-图片/公式图/formula-e193627b92a6b795.webp,/90-图片/公式图/formula-f74801b8674b37ff.webp\\",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"在上述国家中，2008年有5个国家的磷肥施用量少于钾肥的施用量\", \"html\": \"<p>在上述国家中，2008年有5个国家的磷肥施用量少于钾肥的施用量</p>\", \"is_answer\": true}, {\"key\": \"B\", \"label\": \"2008年南非单位耕地面积磷肥施用量高于英国\", \"html\": \"<p>2008年南非单位耕地面积磷肥施用量高于英国</p>\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2008年美国氮肥、磷肥、钾肥的施用量均超过世界总施用量的\", \"html\": \"<p>2008年美国氮肥、磷肥、钾肥的施用量均超过世界总施用量的<img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-f74801b8674b37ff.webp\\\" /></p>\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"在上述国家中，2008年耕地面积最少的国家也是上述三种化肥施用量最少的国家\", \"html\": \"<p>在上述国家中，2008年耕地面积最少的国家也是上述三种化肥施用量最少的国家</p>\", \"is_answer\": false}]",
+   "answer": "A",
+   "qtype": "single"
+  },
+  {
+   "qid": "2042100",
+   "material": "<p><img width=\"700px\" height=\"421px\" src=\"/90-图片/题目图/15abbd49ea2c040.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/15abbd49ea2c040.webp,/90-图片/公式图/formula-3dbd4974485ed91d.webp,/90-图片/公式图/formula-5a73355d224969c5.webp,/90-图片/公式图/formula-9edd84abb9882c50.webp,/90-图片/公式图/formula-ec2b434be7cf4395.webp,/90-图片/公式图/formula-a83a230b72fe83e5.webp,/90-图片/公式图/formula-17a28b74ddd814ee.webp,/90-图片/公式图/formula-3da209e854260a1c.webp,/90-图片/公式图/formula-e426456d6062b2f0.webp,/90-图片/公式图/formula-8f61834c0c636317.webp\\",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"2016年第一季度，全国星级饭店餐饮总收入为248.3亿元\", \"html\": \"<p>2016年第一季度，全国星级饭店餐饮总收入为248.3亿元</p>\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"2016年第一季度，全国三星级饭店数量占星级饭店数量的比重大于\", \"html\": \"<p>2016年第一季度，全国三星级饭店数量占星级饭店数量的比重大于<img flag=\\\"tex\\\" src=\\\"/90-图片/公式图/formula-8f61834c0c636317.webp\\\" /></p>\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2016年第一季度，全国二星级饭店的餐饮与客房收入都低于其他星级饭店\", \"html\": \"<p>2016年第一季度，全国二星级饭店的餐饮与客房收入都低于其他星级饭店</p>\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"2016年第一季度，全国三星级及以下星级饭店的营业收入占全国星级饭店的比重不足三分之一\", \"html\": \"<p>2016年第一季度，全国三星级及以下星级饭店的营业收入占全国星级饭店的比重不足三分之一</p>\", \"is_answer\": true}]",
+   "answer": "D",
+   "qtype": "single"
+  },
+  {
+   "qid": "4714005",
+   "material": "<p><img width=\"700px\" height=\"414px\" src=\"/90-图片/题目图/17efcaa948529b4.webp\" /></p><p><img width=\"700px\" height=\"422px\" src=\"/90-图片/题目图/17efcaaadeeea26.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/17efcaa948529b4.webp,/90-图片/题目图/17efcaaadeeea26.webp,/90-图片/公式图/formula-feaff7125a2aa797.webp,/90-图片/公式图/formula-55745bc000c2ccb6.webp,/90-图片/公式图/formula-a675e49a39d6f779.webp,/90-图片/公式图/formula-f4be7217254f2d67.webp,/90-图片/公式图/formula-488123a4548c42a0.webp,/90-图片/公式图/formula-4e882362fdd488ef.webp,/90-图片/公式图/formula-e0e80ed472cfe517.webp,/90-图片/公式图/formula-ad97554537082b61.webp,/90-图片/公式图/formula-dba4a43378d8c931.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"2011年全社会用电量环比变动的趋势与工业用电量完全一致\", \"html\": \"2011年全社会用电量环比变动的趋势与工业用电量完全一致\", \"is_answer\": true}, {\"key\": \"B\", \"label\": \"2011年和2010年年度工业用电量的峰值均出现在6月份\", \"html\": \"2011年和2010年年度工业用电量的峰值均出现在6月份\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2011年度全社会用电量达到峰值的月份，其非工业用电量增速最高\", \"html\": \"2011年度全社会用电量达到峰值的月份，其非工业用电量增速最高\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"2011年全社会用电量增速与工业用电量增速差距最大的月份，其非工业用电量为当年最小值\", \"html\": \"2011年全社会用电量增速与工业用电量增速差距最大的月份，其非工业用电量为当年最小值\", \"is_answer\": false}]",
+   "answer": "A",
+   "qtype": "single"
+  },
+  {
+   "qid": "2669903",
+   "material": "<p><img width=\"650px\" height=\"229px\" src=\"/90-图片/题目图/175302d01bfe1df.webp\" /></p><p><img width=\"700px\" height=\"240px\" src=\"/90-图片/题目图/175302d1b377dab.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/175302d01bfe1df.webp,/90-图片/题目图/175302d1b377dab.webp,/90-图片/公式图/formula-0c793ae1bc0b6efa.webp,/90-图片/公式图/formula-4f95f34ef577bba4.webp,/90-图片/公式图/formula-4e4d96129b4a10b8.webp,/90-图片/公式图/formula-64e1ebf85627388d.webp,/90-图片/公式图/formula-cf13b46c65ef5335.webp,/90-图片/公式图/formula-2c0ba4300c24f536.webp,/90-图片/公式图/formula-bfc67a25f9250502.webp,/90-图片/公式图/formula-8a964ba681e26cbc.webp,/90-图片/公式图/formula-c33fa5d8ce427f3b.webp,/90-图片/公式图/formula-67d2e28db4f62a83.webp,/90-图片/公式图/formula-1f45ef5af8371c57.webp,/90-图片/公式图/formula-fbf3567e5b37b1a9.webp,/90-图片/公式图/formula-4c0378d3d913ae3b.webp,/90-图片/公式图/formula-dc5ae200d28f8469.webp,/90-图片/公式图/formula-7b7cbc525cf5ad6d.webp,/90-图片/公式图/formula-4ee2c471d4a974e2.webp,/90-图片/公式图/formula-f119c886eb565510.webp,/90-图片/公式图/formula-b7f06335b956bf51.webp,/90-图片/公式图/formula-3fda0c35adb55f55.webp,/90-图片/公式图/formula-e81d48ce82537d10.webp,/90-图片/公式图/formula-220e0903c9b9480d.webp,/90-图片/公式图/formula-f5772ca31f2c8035.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"1979-1982年，GDP增长率逐年提高\", \"html\": \"1979-1982年，GDP增长率逐年提高\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"1979-1982年，农村人口数逐年下降\", \"html\": \"1979-1982年，农村人口数逐年下降\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2013-2016年，城镇人口数较上年增长最多的一年是2016年\", \"html\": \"2013-2016年，城镇人口数较上年增长最多的一年是2016年\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"1979-1982年和2013-2016年的城市化率都呈逐年上升趋势\", \"html\": \"1979-1982年和2013-2016年的城市化率都呈逐年上升趋势\", \"is_answer\": true}]",
+   "answer": "D",
+   "qtype": "single"
+  },
+  {
+   "qid": "2670139",
+   "material": "<p><img width=\"511px\" height=\"444px\" src=\"/90-图片/题目图/1753058ce63ffaf.webp\" /></p><p><img width=\"644px\" height=\"561px\" src=\"/90-图片/题目图/17530591777b377.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/1753058ce63ffaf.webp,/90-图片/题目图/17530591777b377.webp,/90-图片/公式图/formula-b08870e307ffeee4.webp,/90-图片/公式图/formula-f1719d176e9cefd3.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"预测中国2020年风电发电量约为2010年的7倍\", \"html\": \"预测中国2020年风电发电量约为2010年的7倍\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"预测中国2020年各种发电方式的发电量占比将均有所提高\", \"html\": \"预测中国2020年各种发电方式的发电量占比将均有所提高\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"预测中国2020年火电发电量将依然占很大比重\", \"html\": \"预测中国2020年火电发电量将依然占很大比重\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"预测中国2020年火电发电量将会减少\", \"html\": \"预测中国2020年火电发电量将会减少\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "2578830",
+   "material": "<p><img width=\"700px\" height=\"327px\" src=\"/90-图片/题目图/173864aa0feb2eb.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/173864aa0feb2eb.webp,/90-图片/公式图/formula-f6640f15a50d08a1.webp,/90-图片/公式图/formula-24e9170432147b41.webp,/90-图片/公式图/formula-3cd2e63d6c30c0bb.webp,/90-图片/公式图/formula-8e9e9aad1d932d95.webp,/90-图片/公式图/formula-ff3dbe666209c89b.webp,/90-图片/公式图/formula-f9cfc3b0dc2d9128.webp,/90-图片/公式图/formula-21bd0b7bfe4b0971.webp,/90-图片/公式图/formula-80ded44498c968f5.webp,/90-图片/公式图/formula-2b59638e5fea1830.webp,/90-图片/公式图/formula-8f61834c0c636317.webp,/90-图片/公式图/formula-1ddcb4917ca62441.webp,/90-图片/公式图/formula-72e51569d414b32c.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"甲医院的总体治愈率最低，说明甲医院的治疗水平低于其它三所医院\", \"html\": \"甲医院的总体治愈率最低，说明甲医院的治疗水平低于其它三所医院\", \"is_answer\": true}, {\"key\": \"B\", \"label\": \"乙医院的总体治愈率高于其他三所医院的原因是该医院妇科和儿科的出院人数最多\", \"html\": \"乙医院的总体治愈率高于其他三所医院的原因是该医院妇科和儿科的出院人数最多\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"丙医院的内科治愈率低于本院的其它科室, 说明内科治疗水平低于本院其它科室\", \"html\": \"丙医院的内科治愈率低于本院的其它科室, 说明内科治疗水平低于本院其它科室\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"丁医院儿科的治疗水平高于其他三所医院\", \"html\": \"丁医院儿科的治疗水平高于其他三所医院\", \"is_answer\": false}]",
+   "answer": "A",
+   "qtype": "single"
+  },
+  {
+   "qid": "2578891",
+   "material": "<p><img width=\"700px\" height=\"327px\" src=\"/90-图片/题目图/173864aa0feb2eb.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/173864aa0feb2eb.webp,/90-图片/公式图/formula-ff3dbe666209c89b.webp,/90-图片/公式图/formula-b29e927445e48c2a.webp,/90-图片/公式图/formula-22adc0dc21a670e8.webp,/90-图片/公式图/formula-66b08e9d243115be.webp,/90-图片/公式图/formula-4b10079f7a47c715.webp,/90-图片/公式图/formula-e4f6640fc555ceac.webp,/90-图片/公式图/formula-500c43a1cb0dbd8b.webp,/90-图片/公式图/formula-d16091971f2089ca.webp,/90-图片/公式图/formula-75a3845cef284ec4.webp,/90-图片/公式图/formula-a297ec5e7ee7f7ab.webp,/90-图片/公式图/formula-8f8ff454a4ea3a23.webp,/90-图片/公式图/formula-17dde7ade13bac0a.webp,/90-图片/公式图/formula-cedc91a97b712997.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"与其他医院相比，甲医院的总体治愈率最低\", \"html\": \"与其他医院相比，甲医院的总体治愈率最低\", \"is_answer\": true}, {\"key\": \"B\", \"label\": \"乙医院的总体治愈率最高，原因是该医院妇科和儿科的出院人数最多\", \"html\": \"乙医院的总体治愈率最高，原因是该医院妇科和儿科的出院人数最多\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"与其他医院相比，内科治愈率最高的是丙医院\", \"html\": \"与其他医院相比，内科治愈率最高的是丙医院\", \"is_answer\": false}, {\"key\": \"D\", \"label\": \"丁医院的儿科治疗水平高于其他医院\", \"html\": \"丁医院的儿科治疗水平高于其他医院\", \"is_answer\": false}]",
+   "answer": "A",
+   "qtype": "single"
+  },
+  {
+   "qid": "2776065",
+   "material": "<p><img width=\"700px\" height=\"425px\" src=\"/90-图片/题目图/179ea3f6066f91a.webp\" /></p>",
+   "img_refs": "/90-图片/公式图/formula-b08870e307ffeee4.webp,/90-图片/题目图/179ea3f6066f91a.webp,/90-图片/公式图/formula-df39880a7c135d23.webp,/90-图片/公式图/formula-784344cc2825f476.webp,/90-图片/公式图/formula-00d38dc8d5447433.webp,/90-图片/公式图/formula-18495b3ff1a6ed26.webp,/90-图片/公式图/formula-174ae5783421e539.webp,/90-图片/公式图/formula-d396f382d50fe044.webp,/90-图片/公式图/formula-8d34ff8d0d243bf3.webp,/90-图片/公式图/formula-bbc3e2a8baf33aeb.webp,/90-图片/公式图/formula-af5113745509e5bc.webp,/90-图片/公式图/formula-eeb567aaf781ea0e.webp,/90-图片/公式图/formula-b0ee79a4ac915724.webp,/90-图片/公式图/formula-ae28e5c65e69b43b.webp,/90-图片/公式图/formula-3e7d25c2b2ef758e.webp,/90-图片/公式图/formula-b2cf47d9b26b2ed2.webp,/90-图片/公式图/formula-a99f00a5f1a88335.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"不到300亿元\", \"html\": \"不到300亿元\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"300~330亿元\", \"html\": \"300~330亿元\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"330~360亿元\", \"html\": \"330~360亿元\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"超过360亿元\", \"html\": \"超过360亿元\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "10204602",
+   "material": "<p><img width=\"642px\" height=\"378px\" src=\"/90-图片/题目图/18e4ac3719f17f9.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/18e4ac3719f17f9.webp,/90-图片/公式图/formula-e94c4ad87ea0e515.webp,/90-图片/公式图/formula-6136036b6d905a2e.webp,/90-图片/公式图/formula-0620da6681b9ec68.webp,/90-图片/公式图/formula-44364d7f981227cd.webp,/90-图片/公式图/formula-dd2c39d644184be5.webp,/90-图片/公式图/formula-e1e09a0a0dd15b1e.webp,/90-图片/公式图/formula-e1111a0c2ca21d0a.webp,/90-图片/公式图/formula-b4a3e6c9cf812bd4.webp,/90-图片/公式图/formula-c60077daaa436114.webp,/90-图片/公式图/formula-ec245c7e771a52e0.webp,/90-图片/公式图/formula-ae1d8e5328831a7e.webp,/90-图片/公式图/formula-06c5e0a3420f0fe3.webp,/90-图片/公式图/formula-ccf081deb2c2fbcc.webp,/90-图片/公式图/formula-9ad7a88fa1bfefd7.webp,/90-图片/公式图/formula-3bd03d324cc5f3b0.webp,/90-图片/公式图/formula-315f7dcdd28c31ef.webp,/90-图片/公式图/formula-e542892c53ea2c83.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"2021年，中国外贸总值首次超过5万亿美元\", \"html\": \"2021年，中国外贸总值首次超过5万亿美元\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"2015-2017年，中国外贸总值的年平均值不超过4万亿美元\", \"html\": \"2015-2017年，中国外贸总值的年平均值不超过4万亿美元\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2021年，中国与共建国家进出口总额增长率低于2022年\", \"html\": \"2021年，中国与共建国家进出口总额增长率低于2022年\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"2022年，中国与共建国家进出口总额比2013年增长了约74%\", \"html\": \"2022年，中国与共建国家进出口总额比2013年增长了约74%\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "4769878",
+   "material": "<p><img width=\"700px\" height=\"397px\" src=\"/90-图片/题目图/17f68e58aa4d8fa.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/17f68e58aa4d8fa.webp,/90-图片/公式图/formula-4edee6e85826e6a9.webp,/90-图片/公式图/formula-2a2613befedb05ef.webp,/90-图片/公式图/formula-aba6aad3b76d38aa.webp,/90-图片/公式图/formula-50a63b99ebd57372.webp,/90-图片/公式图/formula-ea1faeb03cd38e63.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"2017年\", \"html\": \"2017年\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"2018年\", \"html\": \"2018年\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"2019年\", \"html\": \"2019年\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"2020年\", \"html\": \"2020年\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "4769864",
+   "material": "<p><img width=\"700px\" height=\"397px\" src=\"/90-图片/题目图/17f68e58aa4d8fa.webp\" /></p>",
+   "img_refs": "/90-图片/题目图/17f68e58aa4d8fa.webp,/90-图片/公式图/formula-3cb9060144591cda.webp",
+   "has_image": 1,
+   "options": "[{\"key\": \"A\", \"label\": \"3.0\", \"html\": \"3.0\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"3.5\", \"html\": \"3.5\", \"is_answer\": false}, {\"key\": \"C\", \"label\": \"4.0\", \"html\": \"4.0\", \"is_answer\": true}, {\"key\": \"D\", \"label\": \"4.5\", \"html\": \"4.5\", \"is_answer\": false}]",
+   "answer": "C",
+   "qtype": "single"
+  },
+  {
+   "qid": "2343335",
+   "options": "[{\"key\": \"A\", \"label\": \"正确\", \"html\": \"正确\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"错误\", \"html\": \"错误\", \"is_answer\": true}]",
+   "answer": "B",
+   "qtype": "judge"
+  },
+  {
+   "qid": "4756560",
+   "options": "[{\"key\": \"A\", \"label\": \"正确\", \"html\": \"正确\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"错误\", \"html\": \"错误\", \"is_answer\": true}]",
+   "answer": "B",
+   "qtype": "judge"
+  },
+  {
+   "qid": "4756536",
+   "material": "<p>        我们生活于其中的那个物的世界，在它同爱的世界之间断绝交通的时候，便失去了它的平衡。于是我们就不得不为极低廉的东西，付出灵魂的代价。而这种事情只能发生在物的监狱以其铜墙铁壁永远牢不可破威胁吓唬我们的时候，于是就引起了可怕的战斗、嫉妒和压迫、争夺空间和机会，因为这些都是有限的。我们痛苦地意识到这种事情的邪恶，努力采取一切措施，在一个残缺不全的真理的狭窄范围内加以调整。这种努力导致失败。只有它帮助了我们，它以它的一生给我们证明，我们有个灵魂，它的住所在爱的王国里，当我们达到精神上自由的境界时，物就无法以其虚假的价值霸道地欺压我们了。</p>",
+   "img_refs": "",
+   "has_image": 0,
+   "options": "[{\"key\": \"A\", \"label\": \"正确\", \"html\": \"正确\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"错误\", \"html\": \"错误\", \"is_answer\": true}]",
+   "answer": "B",
+   "qtype": "judge"
+  },
+  {
+   "qid": "4756564",
+   "material": "<p>        我们生活于其中的那个物的世界，在它同爱的世界之间断绝交通的时候，便失去了它的平衡。于是我们就不得不为极低廉的东西，付出灵魂的代价。而这种事情只能发生在物的监狱以其铜墙铁壁永远牢不可破威胁吓唬我们的时候，于是就引起了可怕的战斗、嫉妒和压迫、争夺空间和机会，因为这些都是有限的。我们痛苦地意识到这种事情的邪恶，努力采取一切措施，在一个残缺不全的真理的狭窄范围内加以调整。这种努力导致失败。只有它帮助了我们，它以它的一生给我们证明，我们有个灵魂，它的住所在爱的王国里，当我们达到精神上自由的境界时，物就无法以其虚假的价值霸道地欺压我们了。</p>",
+   "img_refs": "",
+   "has_image": 0,
+   "options": "[{\"key\": \"A\", \"label\": \"正确\", \"html\": \"正确\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"错误\", \"html\": \"错误\", \"is_answer\": true}]",
+   "answer": "B",
+   "qtype": "judge"
+  },
+  {
+   "qid": "4756568",
+   "material": "<p>        我们生活于其中的那个物的世界，在它同爱的世界之间断绝交通的时候，便失去了它的平衡。于是我们就不得不为极低廉的东西，付出灵魂的代价。而这种事情只能发生在物的监狱以其铜墙铁壁永远牢不可破威胁吓唬我们的时候，于是就引起了可怕的战斗、嫉妒和压迫、争夺空间和机会，因为这些都是有限的。我们痛苦地意识到这种事情的邪恶，努力采取一切措施，在一个残缺不全的真理的狭窄范围内加以调整。这种努力导致失败。只有它帮助了我们，它以它的一生给我们证明，我们有个灵魂，它的住所在爱的王国里，当我们达到精神上自由的境界时，物就无法以其虚假的价值霸道地欺压我们了。</p>",
+   "img_refs": "",
+   "has_image": 0,
+   "options": "[{\"key\": \"A\", \"label\": \"正确\", \"html\": \"正确\", \"is_answer\": false}, {\"key\": \"B\", \"label\": \"错误\", \"html\": \"错误\", \"is_answer\": true}]",
+   "answer": "B",
+   "qtype": "judge"
+  }
+ ]
+}

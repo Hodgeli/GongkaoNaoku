@@ -306,6 +306,14 @@ def main():
     conn.commit()
     conn.execute("VACUUM")
     conn.close()
+    # 导入会按 vault 原样写回，源库里缺材料/缺选项的题依旧是脏的 —— 统一由补丁兜底
+    try:
+        import fixups
+        n = fixups.apply(DB_PATH)
+        if n:
+            print("[FIX] 已应用题库修正补丁 %d 行（data/fixups.json）" % n)
+    except Exception as e:
+        print("[WARN] 题库修正补丁未应用：%s" % e)
     print("[FILE] 数据库(纯题库):", DB_PATH)
 
 if __name__ == "__main__":
