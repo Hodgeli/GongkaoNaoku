@@ -493,7 +493,12 @@ html[data-focus="1"] .focus-exit:hover{color:var(--ink);border-color:var(--brand
 .toast{padding:10px 16px;border-radius:var(--radius-sm);font-size:13px;
   background:var(--surface);color:var(--ink);border:1px solid var(--rule);
   box-shadow:var(--shadow-lift);animation:toast-in .22s var(--ease);
-  max-width:92vw;line-height:1.5}
+  max-width:92vw;line-height:1.5;
+  display:flex;align-items:center;gap:10px;pointer-events:auto}
+/* 提示里的行内操作（如「撤销」）：#toast-box 本身 pointer-events:none，这里必须显式打开 */
+.toast .t-act{flex:0 0 auto;border:1px solid currentColor;background:transparent;color:inherit;
+  font:inherit;font-weight:700;padding:3px 10px;border-radius:999px;cursor:pointer}
+.toast .t-act:hover{background:oklch(0% 0 0 / .06)}
 .toast.bad{border-color:var(--bad);color:var(--bad);background:oklch(97% 0.020 27)}
 html[data-theme="dark"] .toast.bad{background:oklch(28% 0.030 27)}
 .toast.out{opacity:0;transform:translateY(8px);transition:.28s var(--ease)}

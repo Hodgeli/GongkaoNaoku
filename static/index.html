@@ -54,19 +54,28 @@
    就给出一键强制加载最新版的入口，避免页面永远卡在加载状态。 */
 setTimeout(function () {
   try {
+    /* 只在前端确实没启动起来时才提示。
+       以前是无条件替换 #app：机器慢 / 题库大时 /api/stats 还没回来（.loading 仍在），
+       8 秒一到就把正在加载的页面整个换掉，反而制造了"打不开"。 */
+    if (window.__kgBooted) return;
     if (document.querySelector('.modal-mask') || document.getElementById('lg-user')) return;
     var a = document.getElementById('app');
     if (!a || !a.querySelector('.loading')) return;
-    a.innerHTML = '<div style="padding:32px;text-align:center;line-height:2">'
-      + '<div>页面没有正常加载完成，通常是浏览器里残留的旧版本缓存导致。</div>'
-      + '<button id="kg-rescue" style="margin-top:14px;padding:10px 22px;border-radius:8px;cursor:pointer">强制加载最新版本</button>'
-      + '<div style="opacity:.6;font-size:12px;margin-top:10px">也可以按 Ctrl+Shift+R（Mac 为 Cmd+Shift+R）硬刷新</div>'
-      + '</div>';
+    if (document.getElementById('kg-slow-tip')) return;
+    var bar = document.createElement('div');
+    bar.id = 'kg-slow-tip';
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;'
+      + 'display:flex;gap:12px;align-items:center;padding:10px 14px;border-radius:10px;'
+      + 'background:rgba(28,28,30,.92);color:#fff;font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.28)';
+    bar.innerHTML = '<span>加载较慢…如果长时间没反应，可强制刷新</span>'
+      + '<button id="kg-rescue" style="padding:6px 12px;border-radius:8px;border:0;cursor:pointer;'
+      + 'background:#2EA043;color:#fff;font-size:13px">强制加载最新版本</button>';
+    document.body.appendChild(bar);
     document.getElementById('kg-rescue').onclick = function () {
       location.replace('/index.html?v=20261023a&t=' + Date.now());
     };
   } catch (e) { }
-}, 8000);
+}, 15000);
 </script>
 </body>
 </html>

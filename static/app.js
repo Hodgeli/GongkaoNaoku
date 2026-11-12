@@ -121,6 +121,7 @@ function downloadMd(filename, text) {
 }
 
 const MODE_LABEL = { new: '新题', mix: '智能复习', review: '复习', wrong: '错题重练', wrongredo: '错题重练', fav: '收藏练习', material: '材料组题' };
+const GRADE_LABEL = { 1: '忘记', 3: '困难', 4: '一般', 5: '熟悉' };
 
 /* ---------- 练习 session 本地快照（继续上次刷题） ---------- */
 const SS_KEY = 'kg_session_v1';
@@ -202,6 +203,7 @@ function resumeAgo(ts) {
 /* 任何视图抛错都不能让页面停在"加载中…"：统一兜住并给重试入口。 */
 async function nav() {
   clearNextBar();
+  abandonExam();   // 离开模考页就停表：否则后台到点会自动交卷，把当前页面整个覆盖掉
   try {
     return await route();
   } catch (e) {
@@ -244,6 +246,34 @@ async function refreshSide(pre) {
       <div class="stat-chip"><span>收藏</span><b style="color:var(--purple)">${s.fav}</b></div>`;
     return s;
   } catch (e) { return null; }
+}
+
+/* 评分、收藏这类高频操作会连续触发侧栏刷新，每题都打一遍 /api/stats 太浪费
+   （它要跑七条聚合查询）。这里做 700ms 合并 + 单飞，最后一次操作结束后补刷一次。 */
+let SIDE_T = null, SIDE_BUSY = false, SIDE_DIRTY = false;
+function scheduleSide(delay) {
+  SIDE_DIRTY = true;
+  clearTimeout(SIDE_T);
+  SIDE_T = setTimeout(runSide, delay == null ? 700 : delay);
+}
+async function runSide() {
+  if (SIDE_BUSY || !SIDE_DIRTY) return;
+  SIDE_DIRTY = false; SIDE_BUSY = true;
+  try { await refreshSide(); }
+  finally {
+    SIDE_BUSY = false;
+    if (SIDE_DIRTY) scheduleSide(250);
+  }
+}
+
+/* 离开模考（路由切换）时清理计时器与状态。
+   模考的 timer 是挂在 state.exam 上的 setInterval，不随 DOM 重建消失；
+   以前切到别的页面后到点仍会触发 examSubmit，把当前页面替换成交卷结果。 */
+function abandonExam() {
+  const E = state.exam;
+  if (!E) return;
+  if (E.timer) { clearInterval(E.timer); E.timer = null; }
+  state.exam = null;   // 已交卷的也清掉：否则在别的页面按 ←/→ 还会被 examGoto 抢走视图
 }
 
 function loading(t) { loadingView(t); }
@@ -341,14 +371,37 @@ function busyBtn(btn, label) {
   return () => { btn.innerHTML = html; btn.disabled = dis; btn.classList.remove('busy'); };
 }
 
-function toast(msg, kind) {
+function toast(msg, kind, act) {
   let box = document.getElementById('toast-box');
   if (!box) { box = document.createElement('div'); box.id = 'toast-box'; document.body.appendChild(box); }
   const el = document.createElement('div');
   el.className = 'toast' + (kind ? ' ' + kind : '');
-  el.textContent = msg;
+  const txt = document.createElement('span');
+  txt.textContent = msg;                 // 用 textContent 而不是 innerHTML：提示文案里可能有用户内容
+  el.appendChild(txt);
+  let timer = null;
+  const close = () => { if (timer) clearTimeout(timer); el.classList.add('out'); setTimeout(() => el.remove(), 300); };
+  if (act && act.label) {
+    const b = document.createElement('button');
+    b.className = 't-act';
+    b.type = 'button';
+    b.textContent = act.label;
+    b.onclick = () => { close(); try { act.onClick && act.onClick(); } catch (e) { console.error(e); } };
+    el.appendChild(b);
+  }
   box.appendChild(el);
-  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 300); }, kind === 'bad' ? 4500 : 2600);
+  timer = setTimeout(close, (act && act.ttl) || (kind === 'bad' ? 4500 : 2600));
+}
+
+/* 题干/材料里的 <img> 由后端直接下发 HTML，本身没有 loading 属性：
+   一道资料分析题可能带几十张公式图，不懒加载就会在进题瞬间全部请求。 */
+function lazyImgs(root) {
+  const box = root || app;
+  if (!box || !box.querySelectorAll) return;
+  box.querySelectorAll('img').forEach(img => {
+    if (!img.getAttribute('loading')) img.setAttribute('loading', 'lazy');
+    if (!img.getAttribute('decoding')) img.setAttribute('decoding', 'async');
+  });
 }
 
 /* 兜底：任何没被 catch 的请求异常都要让人看见，而不是只在控制台里 */
@@ -600,6 +653,7 @@ function renderCard() {
     stopLimitTimer();
   }
   bindSwipe();
+  lazyImgs();
 }
 
 function renderOptions() {
@@ -686,10 +740,11 @@ function renderAct() {
     if (!ok) return;
     f.fav = on ? 1 : 0;
     btn.classList.toggle('on', !!on); btn.textContent = on ? '★ 已收藏' : '☆ 收藏';
-    refreshSide();
+    scheduleSide();
   };
   document.getElementById('t-note').onclick = () => toggleNote();
   document.getElementById('t-detail').onclick = () => { location.hash = '#/detail?id=' + c2id(); };
+  lazyImgs(act);
 }
 function c2id() { return state.session.queue[state.session.idx].id; }
 
@@ -760,11 +815,40 @@ async function doGrade(g) {
     restore(); btns.forEach(b => { b.disabled = false; });
   }
   if (!ok) return;   // 保留评分按钮，让用户重试，避免"以为记下了其实丢了"
-  refreshSide();
+  /* 记下这次评分对应的题与对错：撤销时要把本轮 tally 一起退回去，否则结算数字会多算 */
+  LAST_GRADE = { qid: c.qid, right: S.chosen === (S.full && S.full.answer) };
+  scheduleSide();
   // 前进方式见 autoNextSec()：默认评分后立即切题；设为「不自动」时才停在原题看解析
   S.graded = g;
   renderNextBar();
   saveSession();
+  /* 误点「忘记/熟悉」在立即模式下已经没有回头路（题都换了），给 6 秒撤销窗口 */
+  toast('已记录：' + (GRADE_LABEL[g] || g), '', { label: '撤销', ttl: 6000, onClick: undoLastGrade });
+}
+
+/* 撤销最近一次评分：服务端用 reviews.prev_json 的快照把 srs 写回并删掉那条流水。
+   如果刚评的那道题还在当前队列里，就跳回去重做，省得用户去题库里翻。 */
+async function undoLastGrade() {
+  let r;
+  try { r = await POST('/api/grade/undo', {}); }
+  catch (e) { toast('撤销失败：' + (e && e.message ? e.message : e), 'bad'); return; }
+  if (!r || !r.ok) { toast((r && r.error) || '撤销失败', 'bad'); return; }
+  const S = state.session;
+  if (S && LAST_GRADE && LAST_GRADE.qid === r.qid && S.tally) {
+    S.tally.done = Math.max(0, S.tally.done - 1);
+    if (LAST_GRADE.right) S.tally.right = Math.max(0, S.tally.right - 1);
+    else S.tally.wrong = Math.max(0, S.tally.wrong - 1);
+    LAST_GRADE = null;
+  }
+  if (S && S.queue && r.qid) {
+    const at = S.queue.findIndex(x => x.qid === r.qid);
+    if (at >= 0) {
+      S.idx = at; S.graded = 0; S.phase = 'question'; S.chosen = null; S.full = null;
+      renderCard(); saveSession();
+    }
+  }
+  scheduleSide(200);
+  toast('已撤销上一次评分，可以重新作答');
 }
 
 function nextCard() {
@@ -788,6 +872,7 @@ function nextCard() {
     0 = 不自动，留在原题看完解析再手动点「下一题」
    >0 = 延迟 N 秒自动切题，期间可点按钮提前继续 */
 let NX_TIMER = null;
+let LAST_GRADE = null;   // {qid, right}：最近一次评分，供撤销时回退本轮统计
 function autoNextSec() {
   try {
     const v = localStorage.getItem('kg_autonext');
@@ -893,7 +978,7 @@ async function timeoutCurrent() {
     S.timeoutBusy = false;
   }
   S.tally.done++; S.tally.wrong++; S.timeoutN = (S.timeoutN || 0) + 1;
-  refreshSide();
+  scheduleSide();
   S.graded = 1;
   renderNextBar();
   saveSession();
@@ -1182,7 +1267,7 @@ async function viewDetail(id) {
     finally { restore(); }
     if (!ok) return;
     c.fav = on ? 1 : 0;
-    b.classList.toggle('on', !!on); b.textContent = on ? '★ 已收藏' : '☆ 收藏'; refreshSide();
+    b.classList.toggle('on', !!on); b.textContent = on ? '★ 已收藏' : '☆ 收藏'; scheduleSide();
   };
   document.getElementById('d-note-save').onclick = async (e) => {
     const b = e.currentTarget;
@@ -1210,6 +1295,7 @@ async function viewDetail(id) {
     b.classList.toggle('on', resolved);
     b.textContent = resolved ? '✓ 疑点已复核' : '⚑ 标记疑点已复核';
   };
+  lazyImgs();
 }
 
 /* ---------- kadian ---------- */
@@ -1383,7 +1469,8 @@ async function loadExamHistory() {
 
 async function startExam(cfg) {
   loading('组卷中…');
-  const p = new URLSearchParams(); p.set('mode', 'new'); p.set('size', cfg.n);
+  /* mode=exam：从整个题库随机组卷（含已学题）。用 new 会只抽没学过的，学到后期就组不出卷了 */
+  const p = new URLSearchParams(); p.set('mode', 'exam'); p.set('size', cfg.n);
   if (cfg.module) p.set('module', cfg.module);
   if (cfg.category) p.set('category', cfg.category);
   let res; try { res = await API('/api/next?' + p); } catch (e) { return fatal(e); }
@@ -1444,7 +1531,14 @@ function renderExam() {
     </div>
   </div>`;
   examTick();
-  document.querySelectorAll('.opt').forEach(el => el.onclick = () => { it.chosen = el.dataset.key; renderExam(); });
+  document.querySelectorAll('.opt').forEach(el => el.onclick = () => {
+    it.chosen = el.dataset.key;
+    /* 只切换选中态，不整页重绘：重绘会把滚动位置拉回顶部，长材料题答到一半就跳回开头 */
+    document.querySelectorAll('.opt').forEach(x => x.classList.toggle('sel', x === el));
+    const dot = document.querySelectorAll('.exam-dot')[E.cur];
+    if (dot) dot.classList.add('answered');
+  });
+  lazyImgs();
 }
 function examGoto(i) {
   const E = state.exam; if (!E || i < 0 || i >= E.total) return;
@@ -1455,7 +1549,12 @@ async function examSubmit(auto) {
   const E = state.exam; if (!E || E.submitted) return;
   E.submitted = true; clearInterval(E.timer);
   const used = Math.round((E.minutes * 60 * 1000 - Math.max(0, E.deadline - Date.now())) / 1000);
-  const items = E.items.map(x => ({ id: x.card.id, correct: !!(x.chosen && x.chosen === x.card.answer) }));
+  /* answered=false 的题只计入卷面分，不写记忆曲线（跳过≠遗忘） */
+  const items = E.items.map(x => ({
+    id: x.card.id,
+    correct: !!(x.chosen && x.chosen === x.card.answer),
+    answered: !!x.chosen,
+  }));
   showMask('正在判分并写入记忆曲线…');
   let res;
   try { res = await POST('/api/exam/submit', { title: E.title, duration: used, items }); }
@@ -1485,7 +1584,7 @@ async function examSubmit(auto) {
     </div>
   </div>
   <div id="ex-review"></div>`;
-  refreshSide();
+  scheduleSide();
 }
 function examReview() {
   const E = state.exam; const box = document.getElementById('ex-review');
@@ -2004,10 +2103,12 @@ async function doDeleteUser() {
     let legacy = '';
     try { legacy = localStorage.getItem('kg_cur_user') || ''; } catch (e) { }
     showLogin(legacy ? '检测到本机已有账号但尚未设置密码，请输入用户名登录后设置。' : '');
+    window.__kgBooted = true;   // 登录页已经可用，index.html 的「加载慢」兜底不该再出现
     return;   // 登录成功后会 reload
   }
 
   const un = document.getElementById('user-name'); if (un) un.onclick = () => openUserMenu();
   syncUserChip();
+  window.__kgBooted = true;
   nav().catch(() => { }); refreshSide().catch(() => { });
 })();

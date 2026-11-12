@@ -408,6 +408,12 @@ def ensure_tables():
         db().commit()
     except Exception:
         pass
+    # 评分撤销：reviews 记录评分前的 srs 快照（老库补列，幂等）
+    try:
+        db().execute("ALTER TABLE reviews ADD COLUMN prev_json TEXT")
+        db().commit()
+    except Exception:
+        pass
     # ---------- 云端账号体系（与本地纯昵称账号并存，互不影响） ----------
     db().executescript("""
     CREATE TABLE IF NOT EXISTS cloud_accounts(
@@ -751,6 +757,14 @@ def ops_health():
     return out
 
 
+def _srs_snapshot(row):
+    """评分前的 srs 快照，供「撤销上一次评分」原样恢复。
+    只取会被 _apply_grade 改动的列；不存 qid/user_id（由 WHERE 指定）。"""
+    keys = ("status", "ease", "interval", "repetitions", "lapses", "due",
+            "last_review", "correct", "wrong", "wb_status", "wb_streak", "last_choice")
+    return {k: (row[k] if k in row.keys() else None) for k in keys}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -934,6 +948,7 @@ class Handler(BaseHTTPRequestHandler):
 
         routes = {
             "/api/grade": self.api_grade,
+            "/api/grade/undo": self.api_grade_undo,
             "/api/note": self.api_note,
             "/api/fav": self.api_fav,
             "/api/goal": self.api_goal,
@@ -1129,7 +1144,13 @@ class Handler(BaseHTTPRequestHandler):
                                     WHERE 1=1{cond} AND {NEW}{excl_clause} ORDER BY RANDOM() LIMIT ?""",
                                  (uid, *ea, size - len(rows)))
                     rows += fill
-            else:  # new / study / exam
+            elif mode == "exam":
+                # 模考组卷：从整个题库随机抽（含已学题）。
+                # 以前 exam 走 new 分支，只抽「未学」题 —— 学到后期题库耗尽就组不出卷，
+                # 而模考本来就是检验「已学得怎么样」，不该只考没见过的题。
+                rows = q_all(f"""SELECT * FROM qdb.questions q
+                                WHERE 1=1{cond} ORDER BY RANDOM() LIMIT ?""", (*args, size))
+            else:  # new / study
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE {NEW}{cond}{excl_clause} ORDER BY RANDOM() LIMIT ?""", (uid, *ea, size))
             if rows:
@@ -1443,9 +1464,10 @@ class Handler(BaseHTTPRequestHandler):
                         WHERE qid=? AND user_id=?""",
                      (new["status"], new["ease"], new["interval"], new["repetitions"], new["lapses"],
                       new["due"], now(), correct, 0 if correct else 1, wb, streak, choice, eqid, uid))
-        db().execute("""INSERT INTO reviews(qid,user_id,grade,ts,interval_before,interval_after,ease,timeout)
-                        VALUES(?,?,?,?,?,?,?,?)""",
-                     (eqid, uid, grade, now(), before, new["interval"], new["ease"], 1 if timeout else 0))
+        db().execute("""INSERT INTO reviews(qid,user_id,grade,ts,interval_before,interval_after,ease,timeout,prev_json)
+                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                     (eqid, uid, grade, now(), before, new["interval"], new["ease"],
+                      1 if timeout else 0, json.dumps(_srs_snapshot(st), ensure_ascii=False)))
         return new
 
     def api_grade(self, p):
@@ -1467,6 +1489,52 @@ class Handler(BaseHTTPRequestHandler):
             new = self._apply_grade(eqid, grade, uid, timeout, choice)
             db().commit()
         return self._send(200, {"ok": True, "eqid": eqid, **(new or {})})
+
+    UNDO_WINDOW = 180   # 秒：只允许撤销最近的评分，避免翻旧账把历史状态改乱
+
+    def api_grade_undo(self, p):
+        """撤销最近一次评分：用 reviews.prev_json 里的快照把 srs 原样写回，并删掉那条流水。
+        用于误点「忘记/熟悉」——立即切题后已看不到原题，没有撤销就只能靠再练一次纠正。"""
+        uid = need_uid(p.get("token"))
+        eqid = None
+        if p.get("id"):
+            try:
+                eqid = resolve_qid(int(p.get("id")))
+            except (TypeError, ValueError):
+                eqid = None
+        with _LOCK:
+            if eqid:
+                row = q_one("""SELECT * FROM reviews WHERE user_id=? AND qid=? AND prev_json IS NOT NULL
+                               ORDER BY id DESC LIMIT 1""", (uid, eqid))
+            else:
+                row = q_one("""SELECT * FROM reviews WHERE user_id=? AND prev_json IS NOT NULL
+                               ORDER BY id DESC LIMIT 1""", (uid,))
+            if not row:
+                return self._send(400, {"error": "没有可撤销的评分"})
+            try:
+                ts = datetime.datetime.fromisoformat(row["ts"])
+                too_old = (datetime.datetime.now() - ts).total_seconds() > self.UNDO_WINDOW
+            except Exception:
+                too_old = True
+            if too_old:
+                return self._send(400, {"error": "这条评分已超过可撤销时间"})
+            try:
+                prev = json.loads(row["prev_json"])
+            except Exception:
+                return self._send(400, {"error": "评分快照已损坏，无法撤销"})
+            db().execute("""UPDATE srs SET status=?,ease=?,interval=?,repetitions=?,lapses=?,due=?,
+                            last_review=?,correct=?,wrong=?,wb_status=?,wb_streak=?,last_choice=?
+                            WHERE qid=? AND user_id=?""",
+                         (prev.get("status") or "new", prev.get("ease") or 2.5,
+                          prev.get("interval") or 0, prev.get("repetitions") or 0,
+                          prev.get("lapses") or 0, prev.get("due"), prev.get("last_review"),
+                          prev.get("correct") or 0, prev.get("wrong") or 0,
+                          prev.get("wb_status") or "active", prev.get("wb_streak") or 0,
+                          prev.get("last_choice"), row["qid"], uid))
+            db().execute("DELETE FROM reviews WHERE id=?", (row["id"],))
+            db().commit()
+        return self._send(200, {"ok": True, "qid": row["qid"], "grade": row["grade"],
+                                "restored": {k: prev.get(k) for k in ("status", "due", "interval")}})
 
     def api_note(self, p):
         eqid = resolve_qid(int(p.get("id", 0)))
@@ -1528,14 +1596,19 @@ class Handler(BaseHTTPRequestHandler):
         uid = need_uid(p.get("token"))
         total = len(items); correct = 0
         eqids = [resolve_qid(int(it.get("id", 0) or 0)) for it in items]
-        ensure_srs_rows(uid, [q for q in eqids if q])   # 交卷前统一补行（一次写）
+        # answered=False 表示「跳过没做」：仍计入总分（模考就是按卷面算分），
+        # 但不写记忆曲线 —— 跳过不等于遗忘，按「忘记」记账会平白把间隔打回起点。
+        answered = [bool(it.get("answered", True)) for it in items]
+        ensure_srs_rows(uid, [q for q, a in zip(eqids, answered) if q and a])   # 只给真做过的题补行
         with _LOCK:
-            for it, eqid in zip(items, eqids):
+            for it, eqid, ans in zip(items, eqids, answered):
                 if not eqid:
                     continue
                 ok = bool(it.get("correct"))
                 if ok:
                     correct += 1
+                if not ans:
+                    continue
                 self._apply_grade(eqid, 4 if ok else 1, uid, 1 if it.get("timeout") else 0)
             score = round(correct / total * 100, 1) if total else 0
             db().execute("""INSERT INTO exam_history(title,total,correct,score,duration,ts,user_id)
