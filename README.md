@@ -494,7 +494,11 @@ loginctl enable-linger "$USER"    # 注销后仍保持运行
 ./sync.sh restart             # 只重启（改完 server.py 用这个）
 ```
 
-服务名与端口可用环境变量覆盖：`KAOGONG_SERVICE` / `KAOGONG_BRANCH` / `KAOGONG_PORT`。
+脚本分阶段打印日志（`▶` 开始 / `✓` 完成 / `✗` 失败 / `⚠` 提醒，每步带耗时），同一份日志写入 `sync.log`。
+
+联网前先做预检：代理不通会立刻报错退出，而不是让 `git` 无限期挂着；单条联网命令默认 90s 上限，传输低速超过 30s 自动断开。
+
+可用环境变量覆盖：`KAOGONG_SERVICE`（服务名）/ `KAOGONG_BRANCH`（分支）/ `KAOGONG_PORT`（探测端口）/ `KAOGONG_SYNC_LOG`（日志路径）/ `KAOGONG_NET_TIMEOUT`（联网超时，默认 90）/ `KAOGONG_PROBE_TIMEOUT`（重启后等 HTTP 200 的秒数，默认 60；刚升级完首次重建索引可临时调到 180）。
 
 ### 4. 备份（唯一要备份的文件）
 

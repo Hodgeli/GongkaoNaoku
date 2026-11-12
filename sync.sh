@@ -36,7 +36,7 @@ fail() { REPORTED=1; _emit "✗    " "$*"; }
 run() {
   local rc
   set +e
-  "$@" 2>&1 | sed -u 's/^/      /' | tee -a "$LOG"
+  "$@" 2>&1 | tr '\r' '\n' | sed -u 's/^/      /' | tee -a "$LOG"
   rc=${PIPESTATUS[0]}
   set -e
   return "$rc"
