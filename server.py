@@ -877,11 +877,119 @@ def _srs_snapshot(row):
     return {k: (row[k] if k in row.keys() else None) for k in keys}
 
 
+# ============================================================
+# 安全加固：真实 IP / 请求体上限 / 失败限流
+# ============================================================
+# 反向代理之后才采信 X-Forwarded-For —— 直连公网时该头可被任意伪造，
+# 无条件采信等于把限流关掉。只有显式 TRUST_PROXY=1 才读。
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "0") == "1"
+# 请求体上限：接口都是小 JSON，2MB 足够；防止超大 body 撑爆内存
+MAX_BODY = int(os.environ.get("MAX_BODY_BYTES") or 2 * 1024 * 1024)
+
+_RATE = {}                       # key -> [失败时间戳]
+_RATE_LOCK = threading.Lock()
+
+
+def rate_ok(key, limit, window=600):
+    """滑动窗口：window 秒内失败次数 < limit 才放行。成功一次即清零（见 rate_clear）。"""
+    now_ts = time.time()
+    with _RATE_LOCK:
+        lst = [t for t in _RATE.get(key, []) if now_ts - t < window]
+        if lst:
+            _RATE[key] = lst
+        else:
+            _RATE.pop(key, None)
+        if len(_RATE) > 4096:            # 兜底：被扫表刷爆内存时丢弃最老的一半
+            for k in sorted(_RATE, key=lambda k: max(_RATE[k]))[:2048]:
+                _RATE.pop(k, None)
+        return len(lst) < limit
+
+
+def rate_fail(key):
+    with _RATE_LOCK:
+        _RATE.setdefault(key, []).append(time.time())
+
+
+def rate_clear(key):
+    with _RATE_LOCK:
+        _RATE.pop(key, None)
+
+
+def _inside(path, root):
+    """路径必须落在 root 之内（防目录穿越）。
+
+    不用 str.startswith：`/static/../static-x/a.js` 归一化后是 `/…/static-x/a.js`，
+    它的前缀恰好也是 `/…/static`，会被误放行。commonpath 按路径分量比较，不会。"""
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except (ValueError, OSError):
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *a):
         pass
+
+    # ---------- 安全：响应头 / 客户端 IP / token 来源 / CORS ----------
+    # 与业务无关的通用加固头，所有响应都带
+    _SEC_HEADERS = (
+        ("X-Content-Type-Options", "nosniff"),      # 禁 MIME 嗅探
+        ("X-Frame-Options", "SAMEORIGIN"),          # 禁第三方 iframe 嵌套（配合 CSP frame-ancestors）
+        ("Referrer-Policy", "no-referrer"),         # 外链不带来源，避免 URL 里的信息外泄
+        ("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()"),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+    )
+
+    def _client_ip(self):
+        """限流用的客户端 IP。直连取 socket 地址；只有 TRUST_PROXY=1 才看 X-Forwarded-For。"""
+        if TRUST_PROXY:
+            xff = self.headers.get("X-Forwarded-For") or ""
+            if xff:
+                return xff.split(",")[0].strip() or "?"
+        return self.client_address[0]
+
+    def _header_token(self):
+        """从请求头取登录令牌：Authorization: Bearer xxx，其次 X-Auth-Token。"""
+        a = (self.headers.get("Authorization") or "").strip()
+        if a[:7].lower() == "bearer ":
+            return a[7:].strip()
+        return (self.headers.get("X-Auth-Token") or "").strip()
+
+    def _cors(self):
+        """只在「同源」时放行 CORS。
+
+        以前是无条件 `Access-Control-Allow-Origin: *`：任何第三方站点都能用用户
+        浏览器里的登录态发请求、并读到响应内容（配合 token 放在 URL/body 更是直接可窃取）。
+        本应用的页面与接口本来就同源，所以默认不需要 CORS；只有反向代理改写了
+        Host、或前后端分开部署时才需要——那时 Origin 与 Host 仍然一致，echo 回去即可。
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return {}
+        host = (self.headers.get("Host") or "").strip().lower()
+        try:
+            o = urllib.parse.urlparse(origin)
+        except Exception:
+            return {}
+        if o.netloc and o.netloc.lower() == host:
+            return {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Auth-Token",
+                "Access-Control-Max-Age": "600",
+                "Vary": "Origin",
+            }
+        return {}
+
+    def _sec_headers(self):
+        h = dict(self._SEC_HEADERS)
+        h.update(self._cors())
+        # 只有经 HTTPS 反向代理进来才发 HSTS，避免本机 http 调试时被浏览器强制跳转
+        if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https":
+            h["Strict-Transport-Security"] = "max-age=31536000"
+        return h
 
     # gzip 压缩结果缓存（静态文件按 path+mtime 复用，避免每请求重复压缩）
     _GZ_CACHE = {}
@@ -913,10 +1021,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # 跨域：云端服务器常与本机应用不同源（不同主机/端口），需放行 CORS
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        for k, v in self._sec_headers().items():
+            self.send_header(k, v)
         # 默认禁用缓存；但若 extra 已提供 Cache-Control（如静态资源/图片长缓存），
         # 则不再叠加 no-store，避免两个 Cache-Control 头互相冲突导致缓存失效。
         if not extra or "Cache-Control" not in extra:
@@ -926,6 +1032,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
 
     def _file(self, path, cache=True, max_age=86400, revalidate=False):
         """发送磁盘文件；静态资源/图片默认长缓存(强缓存+ETag+304)，
@@ -980,7 +1087,20 @@ class Handler(BaseHTTPRequestHandler):
         data = re.sub(rb'(name="kg-app-ver"\s+content=")[^"]*(")', rb"\g<1>" + vb + rb"\g<2>", data)
         etag = '"%s-html"' % ver
         extra = {"Cache-Control": "no-cache", "ETag": etag,
-                 "Last-Modified": email.utils.formatdate(mt, usegmt=True)}
+                 "Last-Modified": email.utils.formatdate(mt, usegmt=True),
+                 # CSP：只允许本站脚本/样式/图片，禁止外域脚本、禁止 eval、禁止被嵌套。
+                 # 注：页面里有少量内联 <script> 与 onclick= 属性，故 script-src 仍需
+                 # 'unsafe-inline'；真正把注入面收窄要等这些内联处理器改成事件委托。
+                 "Content-Security-Policy": (
+                     "default-src 'self'; "
+                     "script-src 'self' 'unsafe-inline'; "
+                     "style-src 'self' 'unsafe-inline'; "
+                     "img-src 'self' data: blob:; "
+                     "connect-src 'self'; "
+                     "font-src 'self' data:; "
+                     "object-src 'none'; base-uri 'none'; form-action 'self'; "
+                     "frame-ancestors 'none'"
+                 )}
         if (self.headers.get("If-None-Match") or "").strip('"') == etag.strip('"'):
             return self._send(304, b"", extra=extra)
         self._send(200, data, "text/html; charset=utf-8", extra=extra, gz_key=(fp, ver))
@@ -989,7 +1109,14 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(u.path)
         qs = urllib.parse.parse_qs(u.query)
-        g = lambda k, d="": (qs.get(k) or [d])[0]
+        hdr_tok = self._header_token()
+
+        def g(k, d=""):
+            # 登录令牌优先取请求头（不再拼进 URL：URL 会进浏览器历史、代理日志、Referer）。
+            # 仍兼容 ?token= 只是为了让旧缓存页面不至于立刻失效，新前端一律走请求头。
+            if k == "token" and hdr_tok:
+                return hdr_tok
+            return (qs.get(k) or [d])[0]
 
         if path == "/" or path == "/index.html":
             return self._html_index()
@@ -1018,7 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
                               extra={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
         if path.startswith("/static/"):
             fp = os.path.normpath(os.path.join(STATIC, path[len("/static/"):]))
-            if not fp.startswith(STATIC):
+            if not _inside(fp, STATIC):
                 return self._send(403, {"error": "forbidden"})
             # 页面脚本/样式：内容随 ?v= 版本串变化 → 强缓存 30 天，版本升级即换 URL 必回源，
             # 日常访问零协商 RTT（此前 no-cache 每次都多付一个往返）
@@ -1028,7 +1155,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/90-图片/"):
             rel = path[len("/90-图片/"):]
             fp = os.path.normpath(os.path.join(IMG_ROOT, rel))
-            if not fp.startswith(IMG_ROOT):
+            if not _inside(fp, IMG_ROOT):
                 return self._send(403, {"error": "forbidden"})
             if not os.path.exists(fp):  # 缺图兜底：返回"图片暂缺"占位 WebP，避免破图图标
                 fp = os.path.join(IMG_ROOT, "__missing__.webp")
@@ -1039,22 +1166,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api(path, g)
             except Unauthorized:
                 return self._send(401, {"error": "未登录或登录已失效，请重新登录"})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                return self._send(500, {"error": str(e)})
+            except Exception:
+                return self._fail_500()
             finally:
                 unborrow()
         return self._send(404, {"error": "no route"})
 
+    def _fail_500(self):
+        """内部错误统一出口：异常只进服务端日志，响应里只给一个可对账的 ref。
+
+        以前是 `{"error": str(e)}` —— SQL 片段、文件路径、库名都会漏给客户端，
+        等于免费给攻击者做信息收集。"""
+        import traceback
+        ref = secrets.token_hex(4)
+        sys.stderr.write("\n[500 %s] %s %s\n" % (ref, self.command, self.path))
+        traceback.print_exc()
+        return self._send(500, {"error": "服务器内部错误，请稍后重试", "ref": ref})
+
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(u.path)
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._send(400, {"error": "请求格式错误"})
+        if n < 0 or n > MAX_BODY:
+            return self._send(413, {"error": "请求体过大"})
         raw = self.rfile.read(n) if n else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                payload = {}
         except Exception:
             payload = {}
+        # 令牌同样优先取请求头；body 里的 token 仅作旧客户端兼容
+        hdr_tok = self._header_token()
+        if hdr_tok:
+            payload["token"] = hdr_tok
         if path in ("/ops/api/login", "/ops/api/logout"):
             return self.ops_post(path, payload)
 
@@ -1085,19 +1233,17 @@ class Handler(BaseHTTPRequestHandler):
                 return fn(payload)
             except Unauthorized:
                 return self._send(401, {"error": "未登录或登录已失效，请重新登录"})
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                return self._send(500, {"error": str(e)})
+            except Exception:
+                return self._fail_500()
             finally:
                 unborrow()
         return self._send(404, {"error": "no route"})
 
     def do_OPTIONS(self):
-        """CORS 预检：云端接口跨源调用时浏览器会先发 OPTIONS。"""
+        """CORS 预检：仅对同源请求返回放行头（跨源直接 204 空响应，不给任何许可）。"""
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        for k, v in self._sec_headers().items():
+            self.send_header(k, v)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -1140,8 +1286,11 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.4)          # 拖慢暴力猜解
             return self._send(401, {"error": "口令不正确"})
         sid = ops_issue()
+        # 经 HTTPS 反代进来时补 Secure，避免 Cookie 在明文连接上被嗅探
+        secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else ""
         return self._send(200, {"ok": True}, extra={
-            "Set-Cookie": "kg_ops=%s; Path=/ops; Max-Age=%d; HttpOnly; SameSite=Strict" % (sid, _OPS_TTL)})
+            "Set-Cookie": "kg_ops=%s; Path=/ops; Max-Age=%d; HttpOnly; SameSite=Strict%s"
+                          % (sid, _OPS_TTL, secure)})
 
     def ops_api(self, name, g):
         if not self._ops_guard(g):
@@ -1832,16 +1981,24 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "token": tok, "user": {"id": r["id"], "name": r["name"], "username": r["username"], "anon": bool(r["anon"])}}
 
     def api_auth_register(self, p):
+        # 注册限流：同 IP 10 分钟内最多 20 次，防止脚本批量灌账号撑爆 users.db
+        rk = "reg:" + self._client_ip()
+        if not rate_ok(rk, 20):
+            return self._send(429, {"error": "注册过于频繁，请稍后再试"})
         username = (p.get("username") or "").strip()
         name = (p.get("name") or username).strip()[:12]
         pw = p.get("password") or ""
         if len(username) < 2 or len(username) > 20:
+            rate_fail(rk)
             return self._send(400, {"error": "用户名需 2-20 个字符"})
         if not re.fullmatch(r"[\w一-龥\-]+", username):
+            rate_fail(rk)
             return self._send(400, {"error": "用户名仅支持中文、字母、数字、下划线、连字符"})
         if len(pw) < 6:
+            rate_fail(rk)
             return self._send(400, {"error": "密码至少 6 位"})
         if q_one("SELECT 1 FROM users WHERE username=?", (username,)):
+            rate_fail(rk)
             return self._send(400, {"error": "该用户名已被注册，换一个试试"})
         uid = self._new_uid()
         with _LOCK:
@@ -1856,16 +2013,34 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, self._issue(uid))
 
     def api_auth_login(self, p):
+        # 登录限流，两级计数：
+        #   ① 同 IP 10 分钟内最多 20 次失败 —— 挡「换着用户名撞库」
+        #   ② 同 IP + 同用户名最多 10 次      —— 挡「盯一个账号爆破」
+        # 只按 IP 计数会让别人在同一出口 IP 上试错就把你锁死；加上账号维度后，
+        # 正常用户换网络/换设备仍能登录。成功登录只清 ②，①保留继续累计。
+        ip = self._client_ip()
         username = (p.get("username") or "").strip()
+        rk_ip = "login-ip:" + ip
+        rk_user = "login-acc:" + ip + ":" + username
+        if not rate_ok(rk_ip, 20) or not rate_ok(rk_user, 10):
+            return self._send(429, {"error": "登录尝试过于频繁，请 10 分钟后再试"})
+
+        def _bad():
+            rate_fail(rk_ip)
+            rate_fail(rk_user)
+            time.sleep(0.25)          # 拖慢在线爆破的吞吐
+            return self._send(401, {"error": "用户名或密码错误"})
+
         pw = p.get("password") or ""
         r = q_one("SELECT * FROM users WHERE username=?", (username,))
         if not r:
-            return self._send(401, {"error": "用户名或密码错误"})
+            return _bad()
         if not r["pw_hash"]:
             # 老账号尚未设置密码：提示前端进入「补设密码」流程
             return self._send(200, {"ok": False, "need_password": True, "username": username})
         if not pw_verify(pw, r["pw_hash"]):
-            return self._send(401, {"error": "用户名或密码错误"})
+            return _bad()
+        rate_clear(rk_user)
         return self._send(200, self._issue(r["id"]))
 
     def api_auth_logout(self, p):
@@ -1886,6 +2061,11 @@ class Handler(BaseHTTPRequestHandler):
     def api_auth_guest(self, p):
         """游客模式（匿名）：免注册，自动生成仅本浏览器可见的云端身份。
         数据落服务端但与该 token 绑定；换浏览器/清缓存即新身份，彼此隔离。"""
+        # 每次调用都会写一行账号，限制频率避免被脚本刷爆 users.db
+        rk = "guest:" + self._client_ip()
+        if not rate_ok(rk, 30):
+            return self._send(429, {"error": "创建游客身份过于频繁，请稍后再试"})
+        rate_fail(rk)
         uid = self._new_uid()
         suffix = ''.join(secrets.choice("0123456789") for _ in range(4))
         username = "游客" + suffix
@@ -1949,6 +2129,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_auth_password(self, p):
         """修改密码（需已登录）；也用于老账号首次补设密码。"""
+        rk = "pw:" + self._client_ip()
+        if not rate_ok(rk, 10):
+            return self._send(429, {"error": "尝试过于频繁，请 10 分钟后再试"})
         uid = auth_uid(p.get("token"))
         old = p.get("old_password")
         newpw = p.get("password") or ""
@@ -1960,9 +2143,11 @@ class Handler(BaseHTTPRequestHandler):
             username = (p.get("username") or "").strip()
             r = q_one("SELECT * FROM users WHERE username=?", (username,))
             if not r:
+                rate_fail(rk)
                 return self._send(401, {"error": "请重新登录后再修改密码"})
             err = self._legacy_claim_error(r, p.get("legacy_id"))
             if err:
+                rate_fail(rk)
                 return self._send(403, {"error": err})
             uid = r["id"]
         else:
@@ -1976,21 +2161,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_auth_claim(self, p):
         """老账号首次补设密码：仅当该账号尚无密码时可用（一次性）。"""
+        rk = "claim:" + self._client_ip()
+        if not rate_ok(rk, 10):
+            return self._send(429, {"error": "尝试过于频繁，请 10 分钟后再试"})
         username = (p.get("username") or "").strip()
         pw = p.get("password") or ""
         legacy_id = (p.get("legacy_id") or "").strip()
         if len(pw) < 6:
+            rate_fail(rk)
             return self._send(400, {"error": "密码至少 6 位"})
         r = q_one("SELECT * FROM users WHERE username=?", (username,))
         if not r:
+            rate_fail(rk)
             return self._send(400, {"error": "账号不存在"})
         # 以前这里只在「带了 legacy_id 且不匹配」时拒绝，传空即通过 —— 等于没有校验。
         err = self._legacy_claim_error(r, legacy_id)
         if err:
+            rate_fail(rk)
             return self._send(403, {"error": err})
         with _LOCK:
             db().execute("UPDATE users SET pw_hash=? WHERE id=?", (pw_hash(pw), r["id"]))
             db().commit()
+        rate_clear(rk)
         return self._send(200, self._issue(r["id"]))
 
     def api_users_rename(self, p):

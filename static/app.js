@@ -43,7 +43,16 @@ function setTok(t) {
   TOKEN = t || '';
   try { if (t) localStorage.setItem('kg_token', t); else localStorage.removeItem('kg_token'); } catch (e) { }
 }
-function withU(p) { return p + (p.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok()); }
+/* 令牌只走请求头，不再拼进 URL 或 body：
+   URL 会留在浏览器历史、代理/服务器访问日志、以及跨站请求的 Referer 里，
+   等于把登录凭证写进日志。服务端仍兼容旧的 ?token= / body.token，仅作过渡。 */
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const t = tok();
+  if (t) h['Authorization'] = 'Bearer ' + t;
+  return h;
+}
+function withU(p) { return p; }
 
 /* 统一的失败语义：接口不通就抛异常，交给 nav() 的 catch 显示"重试"。
    以前这里返回 {}，调用方直接取字段就抛 TypeError，而异常没人接，
@@ -55,7 +64,7 @@ async function API(p) {
   netBegin();
   try {
     let r;
-    try { r = await fetch(withU(p)); }
+    try { r = await fetch(p, { headers: authHeaders() }); }
     catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
     if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
     if (!r.ok) throw new ApiError('服务器返回 ' + r.status + '，请稍后重试', r.status);
@@ -69,8 +78,8 @@ async function POST(p, b) {
     let r;
     try {
       r = await fetch(p, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({}, b, { token: tok() })),
+        method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(b || {}),
       });
     } catch (e) { throw new ApiError('网络连接失败，请检查网络后重试', 0); }
     if (r.status === 401) { onExpired(); throw new ApiError('登录已失效', 401); }
@@ -2146,8 +2155,8 @@ async function logoutUser() {
   if (!confirm('退出当前账号？\n你的学习数据仍安全保存在服务器上，之后用用户名和密码即可重新登录。')) return;
   showMask('正在退出…');
   await fetch('/api/auth/logout', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: tok() }),
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: '{}',
   }).catch(() => { });
   setTok(''); ME = null;
   location.reload();
@@ -2184,7 +2193,7 @@ async function doDeleteUser() {
   }
   // bootstrap 与 auth/me 并行发起（省一个往返 RTT；me 依赖的 token 在 localStorage，无先后依赖）
   const bootP = API('/api/bootstrap').then(b => ({ ok: true, b }), e => ({ ok: false, e }));
-  const meP = fetch('/api/auth/me?token=' + encodeURIComponent(tok()))
+  const meP = fetch('/api/auth/me', { headers: authHeaders() })
     .then(r => r.json()).catch(() => null);
   const br = await bootP;
   if (!br.ok) return fatal('后端未就绪：' + br.e);
