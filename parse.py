@@ -314,6 +314,12 @@ def main():
             print("[FIX] 已应用题库修正补丁 %d 行（data/fixups.json）" % n)
     except Exception as e:
         print("[WARN] 题库修正补丁未应用：%s" % e)
+    # 材料独立成表（同样要在 fixups 之后）
+    try:
+        import materials
+        materials.build(DB_PATH)
+    except Exception as e:
+        print("[WARN] 材料表构建失败：%s" % e)
     print("[FILE] 数据库(纯题库):", DB_PATH)
 
 if __name__ == "__main__":

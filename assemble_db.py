@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """合并分卷题库：kaogong.db.part-00..NN -> kaogong.db（克隆后运行一次即可）
 
-合并完成后会自动套用 data/fixups.json 里的逐题修正补丁（见 fixups.py）。
+合并完成后会自动套用 data/fixups.json 里的逐题修正补丁（见 fixups.py），
+并把材料归并成独立的 materials 表（见 materials.py）。
 """
 import glob, os, shutil, sys
 
@@ -25,5 +26,12 @@ try:
         print(f"已应用题库修正补丁 {n} 行（data/fixups.json）。")
 except Exception as e:
     print(f"[WARN] 题库修正补丁未应用：{e}")
+
+# 材料独立成表（必须在 fixups 之后：补丁补的材料也要一起归并进 materials）
+try:
+    import materials
+    materials.build(out)
+except Exception as e:
+    print(f"[WARN] 材料表构建失败：{e}")
 
 print("现在可以运行 python3 server.py")

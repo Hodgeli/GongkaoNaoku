@@ -12,7 +12,7 @@
 ![存储](https://img.shields.io/badge/存储-SQLite%20单文件-blue)
 ![前端](https://img.shields.io/badge/前端-原生%20JS%20SPA-orange)
 ![许可](https://img.shields.io/badge/许可-仅供个人学习-lightgrey)
-![版本](https://img.shields.io/badge/版本-v1.9.0-2EA043)
+![版本](https://img.shields.io/badge/版本-v1.9.1-2EA043)
 
 </div>
 
@@ -59,6 +59,7 @@ git clone https://github.com/Hodgeli/GongkaoNaoku.git
 
 | 版本 | 改动 |
 | :--- | :--- |
+| v1.9.1 | **材料独立成表**：材料不再复制进每道题（7,340 题只对应 1,209 段材料，省掉约 4.5 MB 重复文本），`questions.material_id` 多对一关联；材料组题页改按材料聚合，同一段材料被多份试卷复用时可以选做哪一份 |
 | v1.9.0 | **模考增强**：新增「真题整卷」一键组卷（326 份可整卷组卷，地区/年份/试卷三级联动）；题面按真实卷面模块顺序排列；交卷按模块加权算分并给出模块成绩单（也可切「每题等分」）；答题卡按模块分组、手机端可折叠；**断点续考**（服务端存档，换设备接着做）；历史记录可回看当时的答题卡快照 |
 | v1.8.1 | **修完题库脏数据**：13 道资料分析补回「给定材料」（图表图片已接入本地图库）、5 道判断题补回 `A.正确 / B.错误` 选项；引入 `data/fixups.json` 补丁机制，让逐题修正在重建题库后依然生效 |
 | v1.8.0 | **安全加固**：令牌改走 `Authorization` 请求头（不再进 URL/body）、CORS 收窄为同源、登录两级限流、500 不再回显异常、请求体上限 2MB、目录穿越改用 `commonpath`、补安全响应头与 CSP |
@@ -86,7 +87,7 @@ git clone https://github.com/Hodgeli/GongkaoNaoku.git
 ```bash
 git clone git@github.com:Hodgeli/GongkaoNaoku.git
 cd GongkaoNaoku
-python3 assemble_db.py   # 合并分卷题库，生成 kaogong.db（约 10 秒）
+python3 assemble_db.py   # 合并分卷题库 → kaogong.db（含逐题修正与材料归并，约 10 秒）
 python3 server.py        # 启动
 ```
 
@@ -137,7 +138,7 @@ python3 parse.py
 | **错题本** | 自动收集所有答错的题，支持「只练错题」集中攻克，稳定后自然淡出 |
 | **我的收藏** | 手动标记的重点 / 易错题，支持「只练收藏」 |
 | **模拟考试** | 两种组卷方式：**真题整卷**（选地区/年份/试卷，把当年那一整份卷子原样抽出来，题量、模块构成、卷面顺序都对得上）和**快速组卷**（按模块/题量/时长随机抽）。题面按真实卷面模块顺序排列（政治理论 → 常识 → 言语 → 数量 → 判断 → 资料），交卷按模块加权算分并给出各模块成绩单；中途关掉浏览器也能**断点续考**，历史记录里能翻出当时的答题卡 |
-| **材料组题** | 资料分析按同一段材料成组出题（702 组标准 5 题组）；练习新题时也会自动整组带出，不用反复重读材料 |
+| **材料组题** | 资料分析按同一段材料成组出题。材料已独立成表，按「材料」而不是「编号」聚合：839 段 2~8 题的标准组，可一键看全部 1,209 段；同一段材料被多份试卷复用时（联考同题，121 段）卡片会标「N 份卷」，点开选做哪一份。练习新题时也会自动整组带出，不用反复重读材料 |
 | **疑点复核** | 汇总所有标注「官方解析可能有误」的题，逐条复核并标记 |
 | **数据统计** | 连续打卡天数、每日目标环、近半年热力图、各模块正确率、薄弱考点排行、**自评偏差**（自评记住了但其实选错）、顽固题清单 |
 | **真题浏览** | 六模块全量筛选：地区 / 年份 / 关键字 / 复习状态 / 下次复习日 |
@@ -290,7 +291,9 @@ python3 parse.py
 GongkaoNaoku/
 ├─ server.py              Web 服务 + JSON API + 图片服务（标准库实现）
 ├─ fsrs.py                FSRS-5 记忆引擎（稳定性 / 难度双变量 + 学习步）
-├─ assemble_db.py         分卷题库合并器（kaogong.db.part-* → kaogong.db）
+├─ assemble_db.py         分卷题库合并器（kaogong.db.part-* → kaogong.db；合并后自动跑 fixups + materials）
+├─ fixups.py              逐题修正补丁应用器（data/fixups.json → questions）
+├─ materials.py           材料独立成表：按正文去重 → materials + questions.material_id
 ├─ parse.py               题库 Vault → SQLite 导入器（产出纯题库，不碰用户数据）
 ├─ img2webp.py            原题库图片 → WebP 自包含副本（导入流程用，需 Pillow）
 ├─ migrate_v2/v3.py       数据库结构迁移（含用户库缺表兜底）

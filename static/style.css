@@ -285,6 +285,11 @@ html[data-theme="dark"] img{background:oklch(28% 0.010 80)}
 .filters{display:flex;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s5);align-items:flex-end}
 .kd-card{cursor:pointer;transition:.18s var(--ease)}
 .kd-card:hover{border-color:var(--brand)}
+/* 材料组题：同一段材料被多份试卷复用时，卡片内联展开「选哪一份卷子」 */
+.mat-papers{margin-top:12px;padding-top:12px;border-top:1px dashed var(--rule);cursor:default}
+/* 试卷名很长，单行省略，hover 看全文（title 属性） */
+.mat-meta{font-size:12px;color:var(--ink-3);margin:0 0 10px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .linkback{color:var(--brand);cursor:pointer;font-size:13px}
 .footer{margin-top:var(--s12);color:var(--ink-3);font-size:12px;text-align:center}
 

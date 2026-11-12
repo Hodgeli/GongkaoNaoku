@@ -734,7 +734,14 @@ GROUP_BUDGET = 10    # 整组补充后允许比 size 多出的题数
 
 
 def group_materials(rows, uid, size):
-    """把抽到的资料分析题替换成「整组」。已抽到的同组题会去重，不会重复。"""
+    """把抽到的资料分析题替换成「整组」。已抽到的同组题会去重，不会重复。
+
+    分组键是 `material_id`（材料正文指纹）而不是 `material_ref`：
+    `material_ref` 是「编号 + 材料首句」，编号由各份试卷自己编，同一段材料在不同
+    卷子里编号不同就会被拆开，不同材料撞上同一编号又会被并到一起。`material_id`
+    由 `materials.py` 按正文内容生成，天然唯一。再叠 `region`/`year` 是为了区分
+    「同一段材料被多份试卷复用」的情况 —— 联考同题很常见，跨卷合并会一次塞进几十题。
+    """
     if not rows:
         return rows
     seen, out, used = set(), [], 0
@@ -742,14 +749,14 @@ def group_materials(rows, uid, size):
     for r in rows:
         if r["qid"] in seen:
             continue
-        ref = (r.get("material_ref") or "").strip()
-        if r.get("module") == "资料分析" and ref and used < GROUP_LIMIT:
-            key = (r.get("region") or "", r.get("year") or "", ref)
+        mid = (r.get("material_id") or "").strip()
+        if r.get("module") == "资料分析" and mid and used < GROUP_LIMIT:
+            key = (mid, r.get("region") or "", r.get("year") or "")
             grp = q_all("""SELECT q.*, IFNULL(s.status,'new') AS srs_status,
                                   IFNULL(s.lapses,0) AS srs_lapses
                            FROM qdb.questions q
                            LEFT JOIN srs s ON s.qid=q.qid AND s.user_id=?
-                           WHERE q.region=? AND q.year=? AND q.material_ref=?
+                           WHERE q.material_id=? AND IFNULL(q.region,'')=? AND IFNULL(q.year,'')=?
                            ORDER BY q.id LIMIT ?""", (uid, *key, GROUP_MAX + 1))
             # 只整组 2~6 题的组；1 题没什么可带，>6 题（案例分析那类）保持单题
             if 2 <= len(grp) <= GROUP_MAX and len(out) + len(grp) <= budget:
@@ -1486,7 +1493,20 @@ class Handler(BaseHTTPRequestHandler):
                     order = {int(x): i for i, x in enumerate(ids)}
                     rows.sort(key=lambda r: order.get(r["id"], 9999))
             elif mode == "material":
-                rows = q_all("SELECT * FROM qdb.questions WHERE material_ref=? ORDER BY id LIMIT ?", (ref, size))
+                # 按材料取整组：优先用 material_id（材料正文指纹，见 materials.py），
+                # 老客户端传 ref 时退回 material_ref 匹配。
+                mid = g("mid").strip()
+                if mid:
+                    cond2, args2 = "q.material_id=?", [mid]
+                    if g("region"):
+                        cond2 += " AND IFNULL(q.region,'')=?"; args2.append(g("region"))
+                    if g("year"):
+                        cond2 += " AND IFNULL(q.year,'')=?"; args2.append(g("year"))
+                    rows = q_all(f"SELECT * FROM qdb.questions q WHERE {cond2} ORDER BY q.id LIMIT ?",
+                                 (*args2, size))
+                else:
+                    rows = q_all("SELECT * FROM qdb.questions WHERE material_ref=? ORDER BY id LIMIT ?",
+                                 (ref, size))
             elif mode == "fav":
                 rows = q_all(f"""SELECT {SEL} {J}
                                 WHERE q.qid IN (SELECT qid FROM favorites WHERE user_id=?){cond}
@@ -1688,20 +1708,54 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"rows": rows})
 
         if path == "/api/materials":
-            size = max(1, min(100, _int(g("size"), 50)))
-            rows = q_all("""SELECT g.ref, g.n, q.id rep_id, q.material, q.kadian
-                            FROM (SELECT material_ref ref, COUNT(*) n, MIN(id) rep
-                                  FROM qdb.questions WHERE module='资料分析' AND material_ref!=''
-                                  GROUP BY material_ref HAVING n>=2) g
-                            JOIN qdb.questions q ON q.id=g.rep
-                            ORDER BY g.n DESC LIMIT ?""", (size,))
+            # 材料组题：按材料（而不是按 material_ref）聚合。同一段材料被多份试卷复用时
+            # n_paper > 1，点进去再按卷子选 —— 联考同题很常见，不区分会一次塞进几十题。
+            size = max(1, min(120, _int(g("size"), 60)))
+            page = max(1, _int(g("page"), 1))
+            lo = max(1, _int(g("min"), 2))
+            hi = max(lo, _int(g("max"), 8))
+            if g("all") in ("1", "true"):
+                lo, hi = 1, 10 ** 6
+            kw = (g("q") or "").strip()
+            where, args = "m.n_q BETWEEN ? AND ?", [lo, hi]
+            if kw:
+                where += " AND (m.title LIKE ? OR m.body LIKE ?)"
+                args += ["%" + kw + "%", "%" + kw + "%"]
+            total = q_one(f"SELECT COUNT(*) n FROM qdb.materials m WHERE {where}", args)["n"]
+            rows = q_all(f"""SELECT m.mid, m.title, m.n_q, m.n_paper, m.has_image, m.body,
+                                    (SELECT q.region FROM qdb.questions q
+                                      WHERE q.material_id=m.mid LIMIT 1) region,
+                                    (SELECT q.year FROM qdb.questions q
+                                      WHERE q.material_id=m.mid LIMIT 1) year,
+                                    (SELECT q.paper FROM qdb.questions q
+                                      WHERE q.material_id=m.mid LIMIT 1) paper
+                             FROM qdb.materials m WHERE {where}
+                             ORDER BY m.n_q DESC, m.mid LIMIT ? OFFSET ?""",
+                         args + [size, (page - 1) * size])
             out = []
             for r in rows:
                 # 先剥离疑点/解析块，避免材料组列表页剧透答案
-                snippet = re.sub(r"<[^>]+>", " ", strip_leak_blocks(r["material"] or ""))
-                snippet = re.sub(r"\s+", " ", snippet).strip()[:70]
-                out.append({"ref": r["ref"], "n": r["n"], "rep_id": r["rep_id"], "snippet": snippet})
-            return self._send(200, {"rows": out})
+                snippet = re.sub(r"<[^>]+>", " ", strip_leak_blocks(r["body"] or ""))
+                snippet = re.sub(r"\s+", " ", snippet).strip()[:90]
+                out.append({"mid": r["mid"], "title": r["title"] or "", "n": r["n_q"],
+                            "n_paper": r["n_paper"], "has_image": bool(r["has_image"]),
+                            "snippet": snippet, "region": r["region"] or "",
+                            "year": r["year"] or "", "paper": r["paper"] or ""})
+            return self._send(200, {"total": total, "page": page, "size": size, "rows": out})
+
+        if path == "/api/materials/one":
+            # 某段材料被哪些试卷用到、每份卷子下有几道题
+            need_uid(g("token"))
+            mid = (g("mid") or "").strip()
+            m = q_one("SELECT mid,title,n_q,n_paper,has_image FROM qdb.materials WHERE mid=?", (mid,))
+            if not m:
+                return self._send(404, {"error": "没有这段材料"})
+            papers = q_all("""SELECT IFNULL(region,'') region, IFNULL(year,'') year,
+                                     IFNULL(paper,'') paper, COUNT(*) n, MIN(id) first_id
+                              FROM qdb.questions WHERE material_id=?
+                              GROUP BY region, year, paper
+                              ORDER BY year DESC, n DESC""", (mid,))
+            return self._send(200, {"material": m, "papers": papers})
 
         if path == "/api/doubts":
             page = max(1, _int(g("page"), 1)); size = max(1, min(50, _int(g("size"), 20)))
@@ -2404,6 +2458,24 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, {"ok": True})
 
 
+def ensure_materials():
+    """题库升级兜底：老库没有 `material_id` / `materials` 表结构不全时自动补建一次。
+
+    正常交付的库是构建时就跑过 `materials.py` 的，这里只花一次 PRAGMA 的时间。
+    但用户自己拿旧版 `kaogong.db` 直接换上来时，不补这一下「材料组题」就是空的。
+    """
+    try:
+        mcols = {r["name"] for r in q_all("PRAGMA qdb.table_info(materials)")}
+        qcols = {r["name"] for r in q_all("PRAGMA qdb.table_info(questions)")}
+        if "n_q" in mcols and "material_id" in qcols:
+            if q_one("SELECT COUNT(*) n FROM qdb.materials")["n"]:
+                return
+        import materials as materials_mod
+        materials_mod.build(DB_PATH)
+    except Exception as e:
+        print("[WARN] 材料表初始化失败（不影响其他功能）：", e)
+
+
 def main():
     if not os.path.exists(DB_PATH):
         print("[ERR] 数据库不存在，请先运行: python parse.py")
@@ -2413,6 +2485,7 @@ def main():
     try:
         ensure_tables()
         q_one("SELECT COUNT(*) n FROM qdb.questions")   # 兜底：ATTACH 缺文件会静默建空库
+        ensure_materials()   # 材料独立成表（老库自动补建，幂等）
         # 自定义 FSRS 参数（settings.fsrs_w 存 19 个浮点的 JSON 数组），没配就用官方默认
         try:
             wj = get_setting("fsrs_w")

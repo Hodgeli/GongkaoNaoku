@@ -607,6 +607,9 @@ async function startSession(cfg) {
   if (cfg.category) p.set('category', cfg.category);
   if (cfg.kadian) p.set('kadian', cfg.kadian);
   if (cfg.ref) p.set('ref', cfg.ref);
+  if (cfg.mid) p.set('mid', cfg.mid);
+  if (cfg.region) p.set('region', cfg.region);
+  if (cfg.year) p.set('year', cfg.year);
   if (cfg.ids && cfg.ids.length) p.set('ids', cfg.ids.join(','));
   let res;
   try { res = await API('/api/next?' + p); } catch (e) { return fatal(e); }
@@ -1422,23 +1425,63 @@ function toggleMatFull() {
 }
 
 /* ---------- materials ---------- */
-let MATREFS = [];
-async function viewMaterials() {
+/* 材料按「材料」聚合，不再按 material_ref（「编号+首句」）—— 编号是各份试卷自己编的，
+   同一段材料在不同卷子里编号不同会被拆成几组，不同材料撞上同一编号又会被并成一组。 */
+let MATROWS = [], MATPAPERS = [];
+async function viewMaterials(opts) {
+  const o = opts || {};
   loading('加载材料组…');
-  const res = await API('/api/materials?size=100');
-  MATREFS = res.rows.map(r => r.ref);
+  const p = new URLSearchParams({ size: '60', min: o.all ? '1' : '2', max: o.all ? '9999' : '8' });
+  if (o.q) p.set('q', o.q);
+  let res; try { res = await API('/api/materials?' + p); } catch (e) { return fatal(e); }
+  MATROWS = res.rows;
   app.innerHTML = `
-  <h1>材料组题</h1><p class="sub">资料分析按同一段材料成组出题，整组一起练最贴近真实考场</p>
+  <h1>材料组题</h1><p class="sub">资料分析按同一段材料成组出题。同一段材料被多份试卷复用时，卡片上会标出「N 份卷」，点开再选做哪一份。</p>
+  <div class="row" style="margin-bottom:var(--s4)">
+    <input id="m-q" placeholder="搜材料关键词…" value="${esc(o.q || '')}" style="flex:1;min-width:220px">
+    <button class="btn sm" id="m-go">搜索</button>
+    <button class="btn sm ghost" id="m-all">${o.all ? '只看标准组' : '显示全部（含大材料）'}</button>
+  </div>
+  <div class="sub" style="margin:0 0 var(--s4)">共 ${res.total} 段材料${o.all ? '' : '（默认只列 2~8 题的标准组）'}</div>
   <div class="grid g2">
-    ${res.rows.map((r, i) => `<div class="card kd-card" onclick="startMat(${i})">
-      <div class="row" style="justify-content:space-between"><b>📄 材料组</b><span class="tag">${r.n} 题</span></div>
+    ${res.rows.map((r, i) => `<div class="card kd-card" id="mat-${i}">
+      <div class="row" style="justify-content:space-between">
+        <b>📄 ${r.has_image ? '含图表' : '纯文字'}材料</b>
+        <span class="tag" style="white-space:nowrap">${r.n} 题${r.n_paper > 1 ? ` · ${r.n_paper} 份卷` : ''}</span></div>
       <div class="sub" style="margin:8px 0;line-height:1.5">${esc(r.snippet)}…</div>
-      <div class="row"><span class="btn sm ghost">整组开练 →</span></div>
+      <div class="mat-meta" title="${esc(r.paper)}">${esc(r.region)} ${esc(r.year)}${r.paper ? ' · ' + esc(r.paper) : ''}</div>
+      <div class="row"><span class="btn sm ghost" onclick="openMaterial(${i})">整组开练 →</span></div>
+      <div class="mat-papers"></div>
     </div>`).join('')}
   </div>
-  ${!res.rows.length ? '<div class="empty">暂无成组材料</div>' : ''}`;
+  ${!res.rows.length ? `<div class="empty">没有匹配的材料${o.q ? '，换个关键词试试' : ''}</div>` : ''}`;
+  document.getElementById('m-go').onclick = () => viewMaterials({ q: document.getElementById('m-q').value.trim(), all: o.all });
+  document.getElementById('m-q').onkeydown = (e) => { if (e.key === 'Enter') document.getElementById('m-go').click(); };
+  document.getElementById('m-all').onclick = () => viewMaterials({ q: o.q, all: !o.all });
 }
-function startMat(i) { startSession({ mode: 'material', ref: MATREFS[i] }); }
+
+async function openMaterial(i) {
+  const row = MATROWS[i]; if (!row) return;
+  const box = document.querySelector('#mat-' + i + ' .mat-papers');
+  if (!box) return;
+  if (box.dataset.open === '1') { box.innerHTML = ''; box.dataset.open = ''; return; }
+  box.dataset.open = '1';
+  box.innerHTML = '<div class="sub" style="margin:10px 0 0">加载中…</div>';
+  let d; try { d = await API('/api/materials/one?mid=' + encodeURIComponent(row.mid)); }
+  catch (e) { box.innerHTML = `<div class="sub" style="margin:10px 0 0">${esc(e.message || e)}</div>`; return; }
+  if (d.papers.length === 1) { box.innerHTML = ''; return startMaterial(row.mid, d.papers[0]); }
+  MATPAPERS = d.papers;
+  box.innerHTML = `<div class="mat-papers">
+    <div class="sub" style="margin:10px 0 6px">这段材料被 ${d.papers.length} 份试卷用到，选一份开练：</div>
+    ${d.papers.map((p, j) => `<button class="btn sm ghost" style="margin:0 6px 6px 0" onclick="startMaterial(MATROWS[${i}].mid,MATPAPERS[${j}])">
+      ${esc(p.region)} ${esc(p.year)} · ${p.n} 题</button>`).join('')}
+  </div>`;
+}
+
+function startMaterial(mid, p) {
+  startSession({ mode: 'material', mid, region: p.region, year: p.year,
+    size: String(Math.min(12, p.n || 5)) });
+}
 
 /* ---------- doubts ---------- */
 async function viewDoubts() {
