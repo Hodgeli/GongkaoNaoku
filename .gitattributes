@@ -6,10 +6,14 @@
 # ============================================================
 * text=auto eol=lf
 
-*.bat  -text
-*.cmd  -text
-*.ps1  -text
-LICENSE -text
+# .bat 必须 CRLF（cmd.exe 在 LF 下会在多行 if 块处崩，见设计说明 §12-1）
+# 用 text eol=crlf：仓库内存 LF，检出时自动转回 CRLF，跨平台都不会出错
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# LICENSE 保持字节原样，不做任何换行转换（避免「只改行尾」的伪改动）
+LICENSE -text -eol
 
 *.py   text eol=lf
 *.sh   text eol=lf
