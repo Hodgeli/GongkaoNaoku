@@ -43,6 +43,8 @@ let HEALING = false;
 /* ---------- 账号：用户名 + 密码登录，token 鉴权（服务端按账号隔离数据） ---------- */
 let TOKEN = '';
 let ME = null;   // 当前登录账号 {id,name,username}
+/* 自助注册已关闭，想用的人发邮件到这个地址申请开号（与 server.py 的 KAOGONG_REGISTER_CONTACT 保持一致） */
+const REGISTER_CONTACT = 'hodge_li@qq.com';
 try { TOKEN = localStorage.getItem('kg_token') || ''; } catch (e) { }
 function tok() { return TOKEN || ''; }
 function setTok(t) {
@@ -2387,16 +2389,14 @@ function viewSettings() {
     <div class="card" style="max-width:640px;margin-top:16px">
     <h2 style="margin-top:0">👤 账号管理</h2>
     <div class="row" style="justify-content:space-between;gap:16px;flex-wrap:wrap">
-      <div>当前账号：<b id="st-user">—</b>${(ME && ME.username) ? '（用户名 ' + esc(ME.username) + '）' : ''}<br><span class="sub" style="margin:4px 0 0">${(ME && ME.anon) ? '游客模式：学习数据保存在本浏览器对应的云端身份，清空浏览器数据后将无法恢复。' : '各账号的学习进度、收藏与笔记相互隔离，凭用户名 + 密码登录。'}</span></div>
+      <div>当前账号：<b id="st-user">—</b>${(ME && ME.username) ? '（用户名 ' + esc(ME.username) + '）' : ''}<br><span class="sub" style="margin:4px 0 0">各账号的学习进度、收藏与笔记相互隔离，凭用户名 + 密码登录。</span></div>
       <div class="row">
         <button class="btn ghost" id="st-switch">切换账号</button>
         <button class="btn" id="st-pw">修改密码</button>
         <button class="btn" id="st-out">退出账号</button>
         <button class="btn danger" id="st-del">删除当前账号</button>
-        <button class="btn ok" id="st-upgrade">升级为正式账号</button>
       </div>
     </div>
-    ${(ME && ME.anon) ? '<p class="sub" style="margin:10px 0 0">游客模式无需登录即可使用；如需跨设备同步或在其它浏览器继续学习，可「升级为正式账号」设定用户名与密码。</p>' : ''}
   </div>
   <div class="card" style="max-width:640px;margin-top:16px">
     <h2 style="margin-top:0">关于</h2>
@@ -2519,48 +2519,11 @@ function viewSettings() {
     finally { restore(); }
   };
   const su = document.getElementById('st-user'); if (su) su.textContent = ME ? (ME.name || ME.username) : '未登录';
-  const anon = !!(ME && ME.anon);
   if (document.getElementById('st-switch')) document.getElementById('st-switch').onclick = logoutUser;   // 切换账号 = 退出后用另一账号登录
-  const pwBtn = document.getElementById('st-pw'); if (pwBtn) pwBtn.style.display = anon ? 'none' : '';
-  const delBtn = document.getElementById('st-del'); if (delBtn) delBtn.style.display = anon ? 'none' : '';
-  const upBtn = document.getElementById('st-upgrade'); if (upBtn) upBtn.style.display = anon ? '' : 'none';
-  if (pwBtn) pwBtn.onclick = changePassword;
+  const pwBtn = document.getElementById('st-pw');
+  if (pwBtn) { pwBtn.onclick = changePassword; }
   document.getElementById('st-out').onclick = logoutUser;
-  if (delBtn) delBtn.onclick = doDeleteUser;
-  if (upBtn) upBtn.onclick = upgradeAccount;
-}
-
-/* 游客账号升级为正式账号：设定用户名 + 密码，解除匿名 */
-function upgradeAccount() {
-  const box = document.createElement('div');
-  box.className = 'modal-mask';
-  box.innerHTML = `<div class="modal card">
-    <h2 style="margin-top:0">🛡️ 升级为正式账号</h2>
-    <p class="sub" style="margin-bottom:14px">为游客身份设定用户名和密码后，即可在任何浏览器凭账号登录、继续你的学习进度（数据不变）。</p>
-    <label class="fld" style="display:block;margin-bottom:8px">用户名<input id="up-user" size="20" autocomplete="username"></label>
-    <label class="fld" style="display:block;margin-bottom:8px">密码（至少 6 位）<input id="up-pw" type="password" size="20" autocomplete="new-password"></label>
-    <button class="btn ok" id="up-go" style="width:100%">升级并保存</button>
-    <button class="btn ghost" id="up-cancel" style="width:100%;margin-top:8px">取消</button>
-  </div>`;
-  document.body.appendChild(box);
-  const $ = id => box.querySelector('#' + id);
-  const cancel = () => box.remove();
-  box.querySelector('#up-cancel').onclick = cancel;
-  box.onclick = e => { if (e.target === box) cancel(); };
-  $('up-go').onclick = async () => {
-    const username = $('up-user').value.trim();
-    const password = $('up-pw').value;
-    if (!username || password.length < 6) { alert('用户名不能为空，密码至少 6 位'); return; }
-    const go = $('up-go');
-    if (go.disabled) return;
-    const restore = busyBtn(go, '正在升级…');
-    try {
-      const r = await POST('/api/auth/upgrade', { username, password });
-      if (!r.ok) { restore(); alert(r.error || '升级失败'); return; }
-      onLoginOk(r); box.remove(); location.reload();
-    } catch (e) { restore(); alert('操作失败：' + e); }
-  };
-  $('up-user').focus();
+  const delBtn = document.getElementById('st-del'); if (delBtn) delBtn.onclick = doDeleteUser;
 }
 
 /* ---------- 主题 / 字号 / 专注 ---------- */
@@ -2603,7 +2566,8 @@ function onLoginOk(d) {
   syncUserChip();
 }
 
-/* 登录 / 注册界面（未登录时全屏，不列出任何账号名，避免泄露他人昵称） */
+/* 登录界面（未登录时全屏，不列出任何账号名，避免泄露他人昵称）
+   自助注册已关闭：不再提供「注册新账号」入口，改为提示发邮件申请。 */
 function showLogin(msg) {
   document.querySelectorAll('.modal-mask').forEach(m => m.remove());
   const box = document.createElement('div');
@@ -2611,70 +2575,42 @@ function showLogin(msg) {
   box.innerHTML = `<div class="modal card">
     <h2 style="margin-top:0">🔐 考公脑库</h2>
     <p class="sub" style="margin-bottom:14px">${msg ? esc(msg) + '<br>' : ''}登录后使用，各账号的学习数据相互隔离。</p>
-    <div class="row" style="gap:8px;margin-bottom:12px">
-      <button class="qtool on" id="lg-tab-login">登录</button>
-      <button class="qtool" id="lg-tab-reg">注册新账号</button>
-    </div>
     <label class="fld" style="display:block;margin-bottom:8px">用户名<input id="lg-user" size="20" autocomplete="username"></label>
     <label class="fld" style="display:block;margin-bottom:8px">密码<input id="lg-pw" type="password" size="20" autocomplete="current-password"></label>
-    <label class="fld" id="lg-name-wrap" style="display:none;margin-bottom:8px">昵称（可留空）<input id="lg-name" size="20" maxlength="12"></label>
     <button class="btn ok" id="lg-go" style="width:100%">登录</button>
-    <div class="guest-sep"><span>或</span></div>
-    <button class="btn guest" id="lg-guest" style="width:100%">🚪 游客模式 · 免注册直接使用</button>
-    <p class="sub" style="margin:12px 0 0;font-size:12px">💡 首次使用点「注册新账号」。用户名 2-20 字，密码至少 6 位。<br>游客模式无需账号，进度仅保存在本浏览器对应的云端身份，清空浏览器数据后将无法恢复。</p>
+    <div class="reg-closed" style="margin:14px 0 0;padding:10px 12px;border-radius:10px;background:rgba(255,193,7,.10);border:1px solid rgba(255,193,7,.35);font-size:13px;line-height:1.6">
+      🔒 <b>本站已关闭自助注册</b><br>需要使用本系统，请发邮件至
+      <a href="mailto:${REGISTER_CONTACT}?subject=${encodeURIComponent('申请开通考公脑库账号')}">${REGISTER_CONTACT}</a>
+      申请开通账号。
+      <button class="btn ghost" id="lg-mail" style="width:100%;margin-top:8px">📧 写邮件申请</button>
+    </div>
+    <p class="sub" style="margin:12px 0 0;font-size:12px">账号由管理员开通，本站不支持匿名/游客登录。</p>
   </div>`;
   document.body.appendChild(box);
   const $ = id => box.querySelector('#' + id);
-  let mode = 'login';
-  const setMode = m => {
-    mode = m;
-    $('lg-tab-login').classList.toggle('on', m === 'login');
-    $('lg-tab-reg').classList.toggle('on', m === 'reg');
-    $('lg-go').textContent = m === 'login' ? '登录' : '注册并进入';
-    $('lg-name-wrap').style.display = m === 'reg' ? 'block' : 'none';
+  $('lg-mail').onclick = () => {
+    location.href = 'mailto:' + REGISTER_CONTACT + '?subject=' + encodeURIComponent('申请开通考公脑库账号')
+      + '&body=' + encodeURIComponent('你好，我想申请使用考公脑库，请开通账号。\n\n称呼：\n用途：');
   };
-  $('lg-tab-login').onclick = () => setMode('login');
-  $('lg-tab-reg').onclick = () => setMode('reg');
   const submit = async () => {
     const username = $('lg-user').value.trim();
     const password = $('lg-pw').value;
     if (!username || !password) { alert('请输入用户名和密码'); return; }
     const go = $('lg-go');
     if (go.disabled) return;
-    const restore = busyBtn(go, mode === 'reg' ? '注册中…' : '登录中…');
+    const restore = busyBtn(go, '登录中…');
     try {
-      if (mode === 'reg') {
-        const r = await fetch('/api/auth/register', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password, name: $('lg-name').value.trim() }),
-        }).then(r => r.json());
-        if (!r.ok) { restore(); alert(r.error || '注册失败'); return; }
-        onLoginOk(r); box.remove(); location.reload();
-      } else {
-        const r = await fetch('/api/auth/login', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        }).then(r => r.json());
-        if (r.need_password) { box.remove(); return showSetPassword(username); }
-        if (!r.ok) { restore(); alert(r.error || '登录失败'); return; }
-        onLoginOk(r); box.remove(); location.reload();
-      }
+      const r = await fetch('/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      }).then(r => r.json());
+      if (r.need_password) { box.remove(); return showSetPassword(username); }
+      if (!r.ok) { restore(); alert(r.error || '登录失败'); return; }
+      onLoginOk(r); box.remove(); location.reload();
     } catch (e) { restore(); alert('操作失败：' + e); }
   };
   $('lg-go').onclick = submit;
   $('lg-pw').onkeydown = e => { if (e.key === 'Enter') submit(); };
-  $('lg-guest').onclick = async () => {
-    const g = $('lg-guest');
-    if (g.disabled) return;
-    const restore = busyBtn(g, '正在创建游客身份…');
-    try {
-      const r = await fetch('/api/auth/guest', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-      }).then(r => r.json());
-      if (!r.ok) { restore(); alert(r.error || '进入游客模式失败'); return; }
-      onLoginOk(r); box.remove(); location.reload();
-    } catch (e) { restore(); alert('操作失败：' + e); }
-  };
   $('lg-user').focus();
 }
 
@@ -2725,7 +2661,7 @@ function openUserMenu() {
     <h2 style="margin-top:0">👤 账号</h2>
     <p class="sub" style="margin-bottom:14px">当前登录：<b>${esc((ME && ME.name) || '—')}</b>${(ME && ME.username) ? '（用户名 ' + esc(ME.username) + '）' : ''}</p>
     <button class="btn" id="um-pw" style="width:100%;margin-bottom:8px">🔑 修改密码</button>
-    <button class="btn danger" id="um-out" style="width:100%;margin-bottom:8px">退出账号</button>${(ME && ME.anon) ? '<p class="sub" style="margin:0">游客模式：退出将清除本浏览器的全部学习数据。</p>' : ''}
+    <button class="btn danger" id="um-out" style="width:100%;margin-bottom:8px">退出账号</button>
     <a class="btn ghost" href="#/settings" style="width:100%;margin-bottom:8px" onclick="document.querySelector('.modal-mask').remove()">⚙ 账号管理</a>
     <button class="btn ghost" id="um-close" style="width:100%">关闭</button>
   </div>`;
@@ -2735,10 +2671,6 @@ function openUserMenu() {
   box.onclick = e => { if (e.target === box) close(); };
   box.querySelector('#um-out').onclick = () => { close(); logoutUser(); };
   box.querySelector('#um-pw').onclick = () => { close(); changePassword(); };
-  if (ME && ME.anon) {
-    const pwBtn = box.querySelector('#um-pw');
-    if (pwBtn) pwBtn.remove();
-  }
 }
 
 function changePassword() {

@@ -16,6 +16,19 @@ import migrate_v2
 DEFAULT_UID = "u1"
 MAX_USERS = 3
 
+# ---------- 注册开关 ----------
+# 默认关闭自助注册：想用的人发邮件申请，由管理员手动开号。
+# 需要临时放开时，启动加环境变量 KAOGONG_ALLOW_REGISTER=1 即可，不用改代码。
+ALLOW_SELF_REGISTER = (os.environ.get("KAOGONG_ALLOW_REGISTER") or "0").strip().lower() in ("1", "true", "yes", "on")
+REGISTER_CONTACT = os.environ.get("KAOGONG_REGISTER_CONTACT") or "hodge_li@qq.com"
+REGISTER_CLOSED_MSG = "本站已关闭自助注册。需要使用本系统，请发邮件至 %s 申请开通账号。" % REGISTER_CONTACT
+
+# ---------- 游客模式开关 ----------
+# 默认关闭游客（匿名）登录：只允许管理员开好号的账号登录。
+# 需要临时放开时，启动加 KAOGONG_ALLOW_GUEST=1。
+ALLOW_GUEST = (os.environ.get("KAOGONG_ALLOW_GUEST") or "0").strip().lower() in ("1", "true", "yes", "on")
+GUEST_CLOSED_MSG = "本站已关闭游客模式，请使用账号登录。没有账号请发邮件至 %s 申请开通。" % REGISTER_CONTACT
+
 VAULT_ROOT = os.environ.get("KAOGONG_VAULT") or os.path.abspath(os.path.join(HERE, "..", "kaogongzhentizhengliu-main"))
 DB_PATH = os.path.join(HERE, "kaogong.db")          # 题库（只读，ATTACH 为 qdb）
 USERS_DB_PATH = os.path.join(HERE, "users.db")      # 用户库（主连接：账号/学习记录，首次启动自动生成）
@@ -2453,6 +2466,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "token": tok, "user": {"id": r["id"], "name": r["name"], "username": r["username"], "anon": bool(r["anon"])}}
 
     def api_auth_register(self, p):
+        # 自助注册已关闭（默认）：直接拒绝，提示发邮件申请。
+        # 想临时放开：KAOGONG_ALLOW_REGISTER=1 启动服务。
+        if not ALLOW_SELF_REGISTER:
+            return self._send(403, {"error": REGISTER_CLOSED_MSG, "register_closed": True,
+                                    "contact": REGISTER_CONTACT})
         # 注册限流：同 IP 10 分钟内最多 20 次，防止脚本批量灌账号撑爆 users.db
         rk = "reg:" + self._client_ip()
         if not rate_ok(rk, 20):
@@ -2532,7 +2550,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_auth_guest(self, p):
         """游客模式（匿名）：免注册，自动生成仅本浏览器可见的云端身份。
-        数据落服务端但与该 token 绑定；换浏览器/清缓存即新身份，彼此隔离。"""
+        数据落服务端但与该 token 绑定；换浏览器/清缓存即新身份，彼此隔离。
+        默认已关闭（ALLOW_GUEST=0），直接返回 403，防止绕过前端刷匿名账号。"""
+        if not ALLOW_GUEST:
+            return self._send(403, {"error": GUEST_CLOSED_MSG, "guest_closed": True,
+                                   "contact": REGISTER_CONTACT})
         # 每次调用都会写一行账号，限制频率避免被脚本刷爆 users.db
         rk = "guest:" + self._client_ip()
         if not rate_ok(rk, 30):

@@ -448,8 +448,6 @@ html[data-focus="1"] .focus-exit:hover{color:var(--ink);border-color:var(--brand
 .modal{max-width:440px;width:100%;max-height:90vh;overflow:auto;box-shadow:var(--shadow-lift)}
 .modal h2{font-size:1.1875rem}
 .modal input{width:100%}
-.guest-sep{display:flex;align-items:center;gap:10px;color:var(--ink-3);font-size:12px;margin:var(--s4) 0 var(--s3)}
-.guest-sep::before,.guest-sep::after{content:"";flex:1;height:1px;background:var(--rule)}
 
 /* ===== 倒计时环 ===== */
 .pp-main{flex:1;min-width:0}
